@@ -182,6 +182,8 @@ def test_check_transform(sentinel, tmp_path):
     r = StreamReader(sentinel["out"], pick_stream(sentinel["out"], "waves"))
     rows = check_transform(r, str(tmp_path), n_bursts=3, verbose=False)
     assert all(x["c_w4_deta"] > 0.9 for x in rows)          # w in fase con d(eta)/dt
+    assert all(x["coh_w4"] > 0.9 and abs(x["ph_w4"]) < 20 for x in rows)
+    assert all(x["coh_uh"] > 0.9 for x in rows)
     assert all(x["c_vb_deta"] > 0.9 for x in rows)
     assert (tmp_path / "check_transform.png").exists()
     # orientamento sbagliato -> correlazione negativa: il controllo se ne accorge

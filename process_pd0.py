@@ -154,6 +154,9 @@ def main(argv=None):
     pc.add_argument("--range", dest="byte_range", default=None, help=RANGE_HELP)
     for n in ("currents", "waves", "plots"):
         common(sub.add_parser(n))
+    pk = sub.add_parser("check", help="solo controllo trasformazione (burst piu' energetici)")
+    common(pk)
+    pk.add_argument("--n-bursts", type=int, default=10)
     pa = sub.add_parser("all", help="convert + currents + waves + plots")
     pa.add_argument("inputs", nargs="+")
     pa.add_argument("--range", dest="byte_range", default=None, help=RANGE_HELP)
@@ -170,6 +173,11 @@ def main(argv=None):
         run_waves(a)
     elif a.cmd == "plots":
         run_plots(a)
+    elif a.cmd == "check":
+        from adcp_pd0.diagnostics import check_transform
+        r = StreamReader(a.out, pick_stream(a.out, "waves", a.waves_stream))
+        check_transform(r, os.path.join(a.out, "figures"), n_bursts=a.n_bursts,
+                        orientation=a.orientation, corr_min=a.corr_min)
     elif a.cmd == "all":
         convert_files(a.inputs, a.out, byte_range=a.byte_range)
         qc = run_currents(a)

@@ -10,6 +10,7 @@ dη/dt (e attenuata con la profondità). Quindi:
 from __future__ import annotations
 
 import numpy as np
+from scipy import signal
 
 from .currents import RHO, G
 from .transform import to_earth
@@ -21,6 +22,31 @@ def _corr(x, y):
     if ok.sum() < 50 or np.std(x[ok]) == 0 or np.std(y[ok]) == 0:
         return np.nan
     return float(np.corrcoef(x[ok], y[ok])[0, 1])
+
+
+def _coh_phase(x, y, fs, nseg=128):
+    """Coerenza al quadrato e fase (gradi) fra x e y in funzione della frequenza."""
+    x = _interp_gaps(np.asarray(x, float), max_frac=0.3)
+    y = _interp_gaps(np.asarray(y, float), max_frac=0.3)
+    if x is None or y is None:
+        return None
+    kw = dict(fs=fs, nperseg=nseg, noverlap=nseg // 2, window="hann")
+    f, Pxy = signal.csd(signal.detrend(x), signal.detrend(y), **kw)
+    _, Pxx = signal.welch(signal.detrend(x), **kw)
+    _, Pyy = signal.welch(signal.detrend(y), **kw)
+    coh = np.abs(Pxy) ** 2 / (Pxx * Pyy)
+    return f, coh, np.degrees(np.angle(Pxy)), Pxx, Pyy
+
+
+def _band_stats(cp, band):
+    if cp is None or not band.any():
+        return np.nan, np.nan
+    f, coh, ph, Pxx, Pyy = cp
+    w = np.sqrt(Pxx * Pyy)[band]
+    c = float(np.sum(coh[band] * w) / np.sum(w))
+    # fase media pesata (circolare)
+    z = np.sum(w * np.exp(1j * np.deg2rad(ph[band])))
+    return c, float(np.degrees(np.angle(z)))
 
 
 def burst_check(ds, attrs, sel=None, orientation=None, frac=0.7, corr_min=64, fs=2.0):
@@ -59,6 +85,26 @@ def burst_check(ds, attrs, sel=None, orientation=None, frac=0.7, corr_min=64, fs
     out["std_w4"] = float(np.nanstd(out["w4"]))
     out["std_vb"] = float(np.nanstd(out["wvb"])) if "wvb" in out else np.nan
     out["std_deta"] = float(np.nanstd(de)) if de is not None else np.nan
+    # coerenza e fase intorno al picco dello spettro di η
+    if de is not None:
+        f, Se = signal.welch(signal.detrend(out["eta"]), fs=fs, nperseg=128, noverlap=64)
+        b = (f >= 0.04) & (f <= 0.5)
+        fp = float(f[b][np.argmax(Se[b])])
+        band = (f >= fp - 0.025) & (f <= fp + 0.025)
+        out["fp"] = fp
+        out["cp_w4"] = _coh_phase(out["w4"], de, fs)
+        out["coh_w4"], out["ph_w4"] = _band_stats(out["cp_w4"], band)
+        if "wvb" in out:
+            out["cp_vb"] = _coh_phase(out["wvb"], de, fs)
+            out["coh_vb"], out["ph_vb"] = _band_stats(out["cp_vb"], band)
+        cu = _coh_phase(out["u"], out["eta"], fs)
+        cv = _coh_phase(out["v"], out["eta"], fs)
+        out["cp_uh"] = None
+        if cu is not None and cv is not None:
+            # coerenza "orizzontale": quota di varianza di (u, v) coerente con η
+            num = cu[1] * cu[3] + cv[1] * cv[3]
+            out["cp_uh"] = (cu[0], num / (cu[3] + cv[3]), cu[2], cu[3] + cv[3], cu[4])
+            out["coh_uh"], _ = _band_stats(out["cp_uh"], band)
     return out
 
 
@@ -67,7 +113,10 @@ def plot_burst_check(res, t, path, title=""):
     from . import plots as P
     n = len(res["w4"])
     tt = np.arange(n) / 2.0
-    fig, axs = plt.subplots(3, 1, figsize=(11, 7), sharex=True, layout="constrained")
+    fig = plt.figure(figsize=(11, 9.5), layout="constrained")
+    gs = fig.add_gridspec(4, 1)
+    axs = [fig.add_subplot(gs[0])]
+    axs += [fig.add_subplot(gs[i], sharex=axs[0]) for i in (1, 2)]
     ax = axs[0]
     if "eta" in res:
         ax.plot(tt, res["eta"], color=P.C1)
@@ -92,6 +141,22 @@ def plot_burst_check(res, t, path, title=""):
                  f"(correlazione mediana vb {res.get('vb_corr_median', np.nan):.0f} counts)")
     for a in axs:
         a.set_xlim(0, min(tt[-1], 120))
+    ax = fig.add_subplot(gs[3])
+    for key, c, lab in (("cp_w4", P.C2, "w 4 beam vs dη/dt"), ("cp_vb", P.C3, "w beam verticale vs dη/dt"),
+                        ("cp_uh", P.C1, "velocita' orizzontali vs η")):
+        cp = res.get(key)
+        if cp is not None:
+            ax.plot(cp[0], cp[1], color=c, label=lab)
+    if np.isfinite(res.get("fp", np.nan)):
+        ax.axvline(res["fp"], color=P.MUTED, ls="--", lw=1)
+        ax.annotate(f"picco {1 / res['fp']:.1f} s", (res["fp"], 0.95), xytext=(4, 0),
+                    textcoords="offset points", color=P.INK2, va="top")
+    ax.set_xlim(0, 0.5)
+    ax.set_ylim(0, 1)
+    ax.set_xlabel("frequenza [Hz]")
+    ax.set_ylabel("coerenza²")
+    ax.set_title("Coerenza con la superficie")
+    ax.legend(loc="upper right", ncols=3)
     fig.suptitle(title or f"Controllo trasformazione, burst {str(t)[:16]} (primi 120 s)",
                  x=0.01, ha="left", fontweight="bold")
     P._save(fig, path)
@@ -131,20 +196,30 @@ def check_transform(reader, out_dir=None, n_bursts=10, min_pings=256, orientatio
     if verbose:
         print(f"  controllo su {len(rows)} burst piu' energetici (Hm0 stimata "
               f"{min(r['Hs_est'] for r in rows):.2f}-{max(r['Hs_est'] for r in rows):.2f} m):")
-        print("     burst              Hm0   corr(w4,dη/dt) corr(wvb,dη/dt) corr(w4,wvb)  std w4  std wvb  std dη/dt [cm/s]")
+        print("     burst              Hm0   Tp   | corr(w4,dη/dt) corr(wvb,dη/dt) | al picco: coh²(w4,dη/dt) fase  "
+              "coh²(wvb,dη/dt) fase  coh²(u,v;η)")
         for r in rows:
-            print(f"     {str(r['time'])[:16]}  {r['Hs_est']:4.2f}   {r['c_w4_deta']:+6.2f}         "
-                  f"{r['c_vb_deta']:+6.2f}         {r['c_w4_vb']:+6.2f}     {r['std_w4'] * 100:5.1f}  "
-                  f"{r['std_vb'] * 100:6.1f}   {r['std_deta'] * 100:6.1f}")
-        c4 = np.nanmedian([r["c_w4_deta"] for r in rows])
-        cv = np.nanmedian([r["c_vb_deta"] for r in rows])
-        print(f"  mediana: corr(w 4 beam, dη/dt) = {c4:+.2f} -> "
-              + ("trasformazione/orientamento OK" if c4 > 0.5 else
-                 "SEGNO OPPOSTO: orientamento o segno della trasformazione da verificare" if c4 < -0.5 else
-                 "debole: da verificare"))
-        print(f"           corr(w beam verticale, dη/dt) = {cv:+.2f} -> "
-              + ("velocita' del beam verticale coerente" + (" (segno invertito: positiva verso il trasduttore)" if cv < 0 else "")
-                 if abs(cv) > 0.5 else "velocita' del beam verticale NON coerente con la superficie (rumore/ambiguita'?)"))
+            print(f"     {str(r['time'])[:16]}  {r['Hs_est']:4.2f} {1 / r.get('fp', np.nan):4.1f}  |  {r['c_w4_deta']:+6.2f}"
+                  f"         {r['c_vb_deta']:+6.2f}        |    {r.get('coh_w4', np.nan):5.2f}       "
+                  f"{r.get('ph_w4', np.nan):+5.0f}     {r.get('coh_vb', np.nan):5.2f}       {r.get('ph_vb', np.nan):+5.0f}"
+                  f"     {r.get('coh_uh', np.nan):5.2f}")
+        def circ_med(a):
+            a = np.deg2rad([x for x in a if np.isfinite(x)])
+            return float(np.degrees(np.angle(np.mean(np.exp(1j * a))))) if len(a) else np.nan
+        c4 = np.nanmedian([r.get("coh_w4", np.nan) for r in rows])
+        p4 = circ_med([r.get("ph_w4", np.nan) for r in rows])
+        cv = np.nanmedian([r.get("coh_vb", np.nan) for r in rows])
+        pv = circ_med([r.get("ph_vb", np.nan) for r in rows])
+        ch = np.nanmedian([r.get("coh_uh", np.nan) for r in rows])
+        print(f"  al picco (mediana): coh²(w 4 beam, dη/dt) = {c4:.2f}, fase {p4:+.0f} gradi -> "
+              + ("trasformazione/orientamento OK (in fase)" if c4 > 0.3 and abs(p4) < 45 else
+                 "SEGNO OPPOSTO: orientamento/segno da verificare" if c4 > 0.3 and abs(p4) > 135 else
+                 "coerenza bassa: non conclusivo"))
+        print(f"                      coh²(w beam verticale, dη/dt) = {cv:.2f}, fase {pv:+.0f} gradi -> "
+              + (("coerente" + (", segno invertito (positiva verso il trasduttore)" if abs(pv) > 135 else ""))
+                 if cv > 0.3 else "poco coerente"))
+        print(f"                      coh²(velocita' orizzontali, η) = {ch:.2f} "
+              "(alta = le velocita' orizzontali vedono le onde: base della direzione PUV)")
     if out_dir and best is not None:
         os.makedirs(out_dir, exist_ok=True)
         plot_burst_check(best, best["time"], os.path.join(out_dir, "check_transform.png"))
