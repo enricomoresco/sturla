@@ -89,6 +89,16 @@ Nel file di Sturla i burst sono di due tipi: **1024 ping (8.5 min)**, usati per 
 almeno 256 ping (`n_short_bursts_skipped` in `waves_bulk.nc` conta gli esclusi); le correnti
 usano tutti i burst (`n_pings` in `currents_avg.nc` dice su quanti ping è fatta ogni media).
 
+**Controllo della trasformazione.** Lo strumento è sul fondo, rivolto verso l'alto: come
+riferimento indipendente si usa la superficie η(t) tracciata dall'eco del beam verticale.
+Per la teoria lineare la velocità verticale delle onde è in fase con dη/dt a ogni quota,
+quindi `corr(w dai 4 beam, dη/dt)` alta e positiva conferma trasformazione e orientamento
+(valore negativo = orientamento/segno sbagliato). Lo stesso test sulla velocità del beam
+verticale dice se quella velocità è utilizzabile. Tabella stampata dal passo `currents`,
+grafico in `figures/check_transform.png` (burst più energetico).
+
+`--hab` = altezza dal fondale del trasduttore/sensore di pressione (altezza del telaio).
+
 Comando consigliato:
 
 ```bash

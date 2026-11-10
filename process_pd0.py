@@ -46,20 +46,11 @@ def run_currents(a):
         ds = average_pings(r, window_min=a.avg_minutes, corr_min=a.corr_min,
                            orientation=a.orientation)
         ds.to_netcdf(os.path.join(a.out, "currents_avg.nc"))
-        if "corr_w4beam_vs_vbeam" in ds.attrs:
-            at = ds.attrs
-            c, sv = at["corr_w4beam_vs_vbeam"], at["std_vbeam_top_bursts"]
-            print(f"  controllo trasformazione ({at['n_bursts_check']} burst piu' energetici): "
-                  f"correlazione w(4 beam) - w(beam verticale) = {c:+.2f}; dev. std w: "
-                  f"beam verticale {sv * 100:.1f} cm/s, 4 beam {at['std_w4beam_top_bursts'] * 100:.1f} cm/s")
-            if sv < 0.02:
-                print("    [NON INFORMATIVO: velocita' orbitali verticali troppo piccole nel periodo]")
-            elif abs(c) > 0.5:
-                print("    [OK: i 4 beam e il beam verticale vedono le stesse onde"
-                      + ("; segno opposto = convenzione di segno del beam verticale]" if c < 0 else "]"))
-            else:
-                print("    [BASSA: possibile problema di trasformazione/orientamento, oppure onde corte "
-                      "rispetto alla distanza fra i beam]")
+        if "vb_echo" in r.variables():
+            from adcp_pd0.diagnostics import check_transform
+            print("  controllo trasformazione con la superficie del beam verticale (dη/dt):")
+            check_transform(r, os.path.join(a.out, "figures"), orientation=a.orientation,
+                            corr_min=a.corr_min)
     qc = qc_currents(ds, corr_min=a.corr_min, pg_min=a.pg_min, err_max=a.err_max,
                      tilt_max=a.tilt_max, p_min=a.p_min, declination=a.declination,
                      orientation=a.orientation, t_start=a.start, t_end=a.end)

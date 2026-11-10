@@ -175,3 +175,15 @@ def test_mixed_bursts(tmp_path):
     avg = average_pings(r, verbose=False)
     assert avg.sizes["time"] == 9
     assert sorted(set(avg.n_pings.values.tolist())) == [180, 1024]
+
+
+def test_check_transform(sentinel, tmp_path):
+    from adcp_pd0.diagnostics import check_transform
+    r = StreamReader(sentinel["out"], pick_stream(sentinel["out"], "waves"))
+    rows = check_transform(r, str(tmp_path), n_bursts=3, verbose=False)
+    assert all(x["c_w4_deta"] > 0.9 for x in rows)          # w in fase con d(eta)/dt
+    assert all(x["c_vb_deta"] > 0.9 for x in rows)
+    assert (tmp_path / "check_transform.png").exists()
+    # orientamento sbagliato -> correlazione negativa: il controllo se ne accorge
+    rows_bad = check_transform(r, None, n_bursts=1, orientation="down", verbose=False)
+    assert rows_bad[0]["c_w4_deta"] < -0.9

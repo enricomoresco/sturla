@@ -185,7 +185,7 @@ def make_sentinel_like(path, bursts=8, interval_min=30, nping=1024, fs=2.0, dept
                 tt = i / fs
                 eta = amp * np.cos(w * tt + ph)
                 uo = amp * w * np.cosh(k * z) / np.sinh(k * depth) * np.cos(w * tt + ph)
-                wo = amp * w * np.sinh(k * z) / np.sinh(k * depth) * np.sin(w * tt + ph)
+                wo = -amp * w * np.sinh(k * z) / np.sinh(k * depth) * np.sin(w * tt + ph)  # = d(eta)/dt * sinh/sinh
                 enu = np.stack([U * prof + uo * np.cos(th_to), V * prof + uo * np.sin(th_to), wo], -1)
                 h_, p_, r_ = heading + rng_.normal(0, 0.5), pitch, roll
                 M = inst_to_earth_matrix([h_], [p_], [r_], "up")[0]
