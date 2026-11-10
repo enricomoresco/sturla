@@ -234,3 +234,13 @@ def test_archive(sentinel, tmp_path):
     assert g.sum() >= 5 and np.allclose(w.Hm0.values[g], sentinel["truth"]["Hs"], rtol=0.12)
     assert w.attrs["instrument_serial_number"] == "12345"
     assert any(f.endswith("_waves.csv") for f in files) and any(f.endswith("_timeseries.csv") for f in files)
+
+
+def test_cli_checks_and_skip_convert(sentinel, tmp_path):
+    with pytest.raises(SystemExit):        # metadati mancanti: errore subito
+        process_pd0.main(["all", sentinel["file"], "-o", str(tmp_path / "x"), "--metadata", "non_esiste.json"])
+    assert not (tmp_path / "x").exists()
+    out = tmp_path / "o"
+    process_pd0.main(["convert", sentinel["file"], "-o", str(out)])
+    process_pd0.main(["all", "--skip-convert", "-o", str(out)])
+    assert any(f.endswith("_waves.nc") for f in os.listdir(out / "archive"))

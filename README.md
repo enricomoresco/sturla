@@ -28,8 +28,9 @@ python process_pd0.py inspect /percorso/dati/*.pd0 --max-mb 200
 python process_pd0.py all /percorso/dati/ -o out --hab 0.6 --metadata metadata.json
 ```
 
-   oppure i singoli passi: `convert`, `currents`, `waves`, `plots`, `archive`, `check`
-   (stessi parametri).
+   oppure i singoli passi: `convert`, `deployment`, `currents`, `waves`, `plots`,
+   `archive`, `check` (stessi parametri). Se i dati sono già convertiti in `out`, si
+   rifà tutto il resto senza riconvertire con `all --skip-convert -o out ...`.
 
 Parametri principali (`python process_pd0.py all -h` per l'elenco completo):
 

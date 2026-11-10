@@ -190,13 +190,24 @@ def main(argv=None):
     pk = sub.add_parser("check", help="solo controllo trasformazione (burst piu' energetici)")
     common(pk)
     pk.add_argument("--n-bursts", type=int, default=10)
-    pa = sub.add_parser("all", help="convert + currents + waves + plots")
-    pa.add_argument("inputs", nargs="+")
+    pa = sub.add_parser("all", help="convert + currents + waves + plots + archive")
+    pa.add_argument("inputs", nargs="*", help="file PD0 (non servono con --skip-convert)")
+    pa.add_argument("--skip-convert", action="store_true",
+                    help="usa i dati gia' convertiti in --out (salta la conversione, la parte lenta)")
     pa.add_argument("--range", dest="byte_range", default=None, help=RANGE_HELP)
     pa.add_argument("--metadata", default=None, help="file JSON di metadati per l'archivio")
     common(pa)
 
     a = p.parse_args(argv)
+    # controlli preliminari: meglio fermarsi subito che dopo minuti di elaborazione
+    if getattr(a, "metadata", None) and not os.path.exists(a.metadata):
+        p.error(f"file di metadati non trovato: {a.metadata}\n"
+                "  crearlo copiando metadata_template.json (Windows: copy metadata_template.json "
+                "metadata.json) e compilarlo, oppure togliere --metadata")
+    if a.cmd == "all" and not a.skip_convert and not a.inputs:
+        p.error("indicare i file PD0 oppure usare --skip-convert")
+    if a.cmd == "all" and a.skip_convert and not os.path.exists(os.path.join(a.out, "inventory.json")):
+        p.error(f"--skip-convert: nessun dato convertito in {a.out} (manca inventory.json)")
     if a.cmd == "inspect":
         inspect_files(a.inputs, a.max_mb, a.byte_range)
     elif a.cmd == "convert":
@@ -220,7 +231,12 @@ def main(argv=None):
         check_transform(r, os.path.join(a.out, "figures"), n_bursts=a.n_bursts,
                         orientation=a.orientation, corr_min=a.corr_min, deployment=_deployment(a, r))
     elif a.cmd == "all":
-        convert_files(a.inputs, a.out, byte_range=a.byte_range)
+        if a.skip_convert:
+            from adcp_pd0.convert import load_inventory, print_inventory
+            print(f"Dati gia' convertiti in {a.out} (conversione saltata)")
+            print_inventory(load_inventory(a.out))
+        else:
+            convert_files(a.inputs, a.out, byte_range=a.byte_range)
         qc = run_currents(a)
         w = run_waves(a)
         run_plots(a, qc, w)
