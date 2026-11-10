@@ -1,0 +1,149 @@
+#!/usr/bin/env python
+"""Preprocessing ADCP Sentinel V (.pd0): conversione, QC correnti, onde, grafici.
+
+Esempi:
+  python process_pd0.py inspect dati/*.pd0 --max-mb 200
+  python process_pd0.py convert dati/ -o out
+  python process_pd0.py currents -o out --declination 2.5
+  python process_pd0.py waves -o out --hab 0.6
+  python process_pd0.py all dati/ -o out --hab 0.6
+"""
+import argparse
+import os
+import sys
+
+import numpy as np
+
+from adcp_pd0 import (convert_files, inspect_files, StreamReader, pick_stream, qc_currents,
+                      analyze_waves)
+from adcp_pd0 import plots
+
+
+def _aux_dataset(reader, max_points=200_000):
+    t = reader.times()
+    ds = reader.load(["pressure", "temperature", "heading", "pitch", "roll"])
+    if ds.sizes["time"] > max_points:
+        ds = ds.isel(time=slice(None, None, ds.sizes["time"] // max_points + 1))
+    return ds
+
+
+def run_currents(a):
+    name = pick_stream(a.out, "currents", a.currents_stream)
+    if name is None:
+        print("Nessuno stream di correnti trovato.")
+        return None
+    print(f"\nCorrenti: stream {name}")
+    r = StreamReader(a.out, name)
+    ds = r.load()
+    qc = qc_currents(ds, corr_min=a.corr_min, pg_min=a.pg_min, err_max=a.err_max,
+                     tilt_max=a.tilt_max, p_min=a.p_min, declination=a.declination,
+                     orientation=a.orientation, t_start=a.start, t_end=a.end)
+    path = os.path.join(a.out, "currents_qc.nc")
+    enc = {k: dict(zlib=True, complevel=1) for k in qc.data_vars}
+    qc.to_netcdf(path, encoding=enc)
+    good = np.isfinite(qc.u.values).mean() * 100
+    print(f"  {qc.sizes['time']:,} ensemble dopo il taglio, {good:.1f}% celle valide -> {path}")
+    r.close()
+    return qc
+
+
+def run_waves(a):
+    name = pick_stream(a.out, "waves", a.waves_stream)
+    if name is None:
+        print("Nessuno stream di onde trovato (nessuno stream a burst con dt <= 2.5 s).")
+        return None
+    print(f"\nOnde: stream {name}")
+    r = StreamReader(a.out, name)
+    w = analyze_waves(r, hab=a.hab, p_atm=a.p_atm, nperseg=a.nperseg, fmin=a.fmin, fmax=a.fmax,
+                      kp2_min=a.kp2_min, use_vb=not a.no_vb, puv_cell=a.puv_cell,
+                      orientation=a.orientation, declination=a.declination)
+    if a.start or a.end:
+        w = w.sel(time=slice(a.start, a.end))
+    path = os.path.join(a.out, "waves_bulk.nc")
+    w.to_netcdf(path)
+    print(f"  {w.sizes['time']} burst -> {path}")
+    r.close()
+    return w
+
+
+def run_plots(a, qc=None, w=None):
+    import xarray as xr
+    from adcp_pd0.convert import load_inventory
+    if qc is None and os.path.exists(os.path.join(a.out, "currents_qc.nc")):
+        qc = xr.load_dataset(os.path.join(a.out, "currents_qc.nc"))
+    if w is None and os.path.exists(os.path.join(a.out, "waves_bulk.nc")):
+        w = xr.load_dataset(os.path.join(a.out, "waves_bulk.nc"))
+    aux = {}
+    for name, s in load_inventory(a.out)["streams"].items():
+        if s.get("label") in ("currents", "waves"):
+            r = StreamReader(a.out, name)
+            aux[name] = _aux_dataset(r)
+            r.close()
+    print("\nGrafici:")
+    plots.plot_all(a.out, qc=qc, waves=w, aux=aux)
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    pi = sub.add_parser("inspect", help="ispezione veloce dei file (nessun output scritto)")
+    pi.add_argument("inputs", nargs="+")
+    pi.add_argument("--max-mb", type=float, default=None, help="analizza solo i primi N MB di ogni file")
+
+    def common(sp):
+        sp.add_argument("-o", "--out", required=True, help="cartella di output")
+        sp.add_argument("--start", default=None, help="inizio periodo utile (es. 2025-06-01T12:00)")
+        sp.add_argument("--end", default=None, help="fine periodo utile")
+        sp.add_argument("--orientation", choices=["up", "down"], default=None,
+                        help="forza l'orientamento (default: dal fixed leader)")
+        sp.add_argument("--declination", type=float, default=0.0,
+                        help="declinazione magnetica [°, positiva verso Est] se non già impostata (EB)")
+        g = sp.add_argument_group("correnti")
+        g.add_argument("--currents-stream", default=None)
+        g.add_argument("--corr-min", type=int, default=64)
+        g.add_argument("--pg-min", type=float, default=50)
+        g.add_argument("--err-max", type=float, default=0.2, help="m/s")
+        g.add_argument("--tilt-max", type=float, default=20)
+        g.add_argument("--p-min", type=float, default=1.0, help="dbar: sotto = fuori acqua")
+        g = sp.add_argument_group("onde")
+        g.add_argument("--waves-stream", default=None)
+        g.add_argument("--hab", type=float, default=0.5, help="altezza sensore sul fondo [m]")
+        g.add_argument("--p-atm", type=float, default=0.0, help="offset pressione atmosferica [dbar]")
+        g.add_argument("--nperseg", type=int, default=256)
+        g.add_argument("--fmin", type=float, default=0.04)
+        g.add_argument("--fmax", type=float, default=0.6)
+        g.add_argument("--kp2-min", type=float, default=0.05)
+        g.add_argument("--puv-cell", type=int, default=None,
+                       help="cella (0-based) per la direzione PUV; default: nessuna")
+        g.add_argument("--no-vb", action="store_true", help="non usare il beam verticale")
+
+    pc = sub.add_parser("convert", help="PD0 -> NetCDF")
+    pc.add_argument("inputs", nargs="+")
+    pc.add_argument("-o", "--out", required=True)
+    for n in ("currents", "waves", "plots"):
+        common(sub.add_parser(n))
+    pa = sub.add_parser("all", help="convert + currents + waves + plots")
+    pa.add_argument("inputs", nargs="+")
+    common(pa)
+
+    a = p.parse_args(argv)
+    if a.cmd == "inspect":
+        inspect_files(a.inputs, a.max_mb)
+    elif a.cmd == "convert":
+        convert_files(a.inputs, a.out)
+    elif a.cmd == "currents":
+        run_currents(a)
+    elif a.cmd == "waves":
+        run_waves(a)
+    elif a.cmd == "plots":
+        run_plots(a)
+    elif a.cmd == "all":
+        convert_files(a.inputs, a.out)
+        qc = run_currents(a)
+        w = run_waves(a)
+        run_plots(a, qc, w)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,120 @@
+# Preprocessing ADCP Sentinel V (.pd0): correnti e onde
+
+Codice Python per leggere i file binari **PD0** di un ADCP Teledyne RDI Sentinel V
+(anche alcuni GB), separare i dati di **corrente** da quelli di **onda**, fare un primo
+controllo di qualità e produrre grafici di quick-look.
+
+## Installazione
+
+```bash
+pip install -r requirements.txt
+```
+
+## Uso rapido
+
+1. **Ispezione** (non scrive niente: capisce cosa c'è nei file; con `--max-mb` legge solo l'inizio):
+
+```bash
+python process_pd0.py inspect /percorso/dati/*.pd0 --max-mb 200
+```
+
+   Stampa i layout degli ensemble (quali data type ci sono: velocità, correlazione, eco,
+   beam verticale, ...), gli *stream* trovati, periodo, intervallo di campionamento e numero
+   di interruzioni (burst).
+
+2. **Tutto in un comando** (conversione + QC correnti + onde + grafici):
+
+```bash
+python process_pd0.py all /percorso/dati/ -o out --hab 0.6 --start 2025-06-01T12:00 --end 2025-07-15T08:00
+```
+
+   oppure i singoli passi: `convert`, `currents`, `waves`, `plots` (stessi parametri).
+
+Parametri principali (`python process_pd0.py all -h` per l'elenco completo):
+
+| opzione | significato | default |
+|---|---|---|
+| `--start`, `--end` | periodo utile (esclude messa in acqua/recupero) | tutto |
+| `--hab` | altezza del sensore/trasduttore dal fondo [m] | 0.5 |
+| `--p-atm` | offset di pressione da sottrarre [dbar] (se il sensore non è stato azzerato in aria) | 0 |
+| `--declination` | declinazione magnetica [°] se **non** già impostata nello strumento (comando EB) | 0 |
+| `--corr-min`, `--pg-min`, `--err-max`, `--tilt-max` | soglie QC correnti | 64, 50 %, 0.2 m/s, 20° |
+| `--puv-cell` | cella (0-based) dello stream onde per la direzione PUV | nessuna |
+| `--currents-stream`, `--waves-stream` | forza la scelta degli stream (nomi da `inspect`) | automatico |
+| `--orientation up/down` | forza l'orientamento | dal fixed leader |
+
+## Output (`out/`)
+
+```
+out/
+  inventory.json          # file, layout, ensemble scartati, stream e loro configurazione
+  raw/<stream>/*.nc       # dati grezzi decodificati, NetCDF compressi (uno o più "part" per file)
+  currents_qc.nc          # correnti dopo QC: u, v, w, err, speed, direction, medie sulla verticale, flag
+  waves_bulk.nc           # per burst: Hm0, Tp, Tm01, Tm02, profondità, f taglio, spettri S(f)
+                          #   (+ Hm0_vb... dal beam verticale, + Dp/Dm se --puv-cell)
+  figures/*.png           # quick-look
+```
+
+Gli stream hanno un nome che descrive la configurazione, ad es. `c30x4_cs50_p60` =
+30 celle × 4 beam, celle da 50 cm, 60 ping per ensemble; il suffisso `_vb` indica la presenza
+del beam verticale. La classificazione automatica: **waves** = stream con campionamento
+≤ 2.5 s e interruzioni fra burst; **currents** = lo stream restante con più ensemble.
+
+## Uso da Python / Jupyter
+
+```python
+from adcp_pd0 import StreamReader, pick_stream, qc_currents, analyze_waves
+
+r = StreamReader("out", pick_stream("out", "waves"))
+ds = r.load(["pressure", "vb_echo"], "2025-06-10", "2025-06-11")   # caricamento per finestra temporale
+r.times()                                                          # solo i tempi (leggero)
+
+cur = StreamReader("out", pick_stream("out", "currents")).load()   # xarray.Dataset
+qc = qc_currents(cur, corr_min=70, err_max=0.1, declination=2.5)
+qc.speed.plot(x="time", y="range")
+```
+
+## Come funziona
+
+- **Lettura** (`adcp_pd0/pd0.py`): il file è mappato in memoria (`mmap`) e scandito una
+  volta registrando solo posizione e struttura di ogni ensemble; byte spuri o ensemble
+  troncati vengono saltati risincronizzandosi sull'header `0x7F7F`. Gli ensemble con la
+  stessa struttura sono poi decodificati in blocco con numpy (a pezzi di ~150 MB) e la
+  checksum è verificata per tutti. Velocità ~20 s/GB; la RAM usata non dipende dalla
+  dimensione del file.
+- **Data type letti**: fixed/variable leader, velocità, correlazione, eco, percent good,
+  beam verticale del Sentinel V (leader `0x0F01`, velocità `0x0A00`, correlazione `0x0B00`,
+  eco `0x0C00`, percent good `0x0D00`). Gli altri data type vengono elencati da `inspect`
+  ma non decodificati.
+- **Correnti** (`currents.py`): taglio temporale, scarto fuori acqua (p < 1 dbar),
+  trasformazione in coordinate Earth se registrato in beam/instrument, rotazione per la
+  declinazione, maschere su correlazione, percent good, velocità d'errore, tilt e
+  contaminazione side-lobe vicino alla superficie (r > D·cos θ − 1 cella).
+- **Onde** (`waves.py`): burst identificati dalle interruzioni nel campionamento; per ogni
+  burst spettro di Welch della pressione, correzione con la funzione di trasferimento
+  della teoria lineare Kp = cosh(k·hab)/cosh(k·h) fino alla frequenza di taglio
+  (Kp² ≥ `--kp2-min`), poi Hm0 = 4√m0, Tp, Tm01, Tm02. Se c'è il beam verticale la
+  superficie è stimata per ogni ping dal massimo di eco (interpolazione parabolica) e se ne
+  ricava uno spettro indipendente (`*_vb`). Con `--puv-cell` la direzione Dp/Dm (di
+  provenienza, °N orari) è calcolata col metodo PUV dai cross-spettri pressione–velocità.
+
+## Da verificare sui propri dati
+
+- Lanciare prima `inspect`: controllare che gli stream trovati corrispondano alla
+  configurazione di deployment (celle, dimensione cella, ping, intervallo burst).
+- Se nei file compaiono data type `unknown_0x....`, il resto si legge comunque, ma quei
+  blocchi sono ignorati. Le trasformazioni beam/instrument → Earth seguono la
+  convenzione RDI: se i dati sono già in Earth (caso più comune, `coord=earth`) non vengono
+  usate.
+- La pressione RDI è normalmente azzerata in aria (gauge); in caso contrario usare `--p-atm`.
+- Hm0 dal beam verticale è una stima approssimata (risoluzione legata alla dimensione delle
+  celle); per i prodotti direzionali completi confrontare con Teledyne Velocity.
+
+## Test
+
+Il generatore `tests/synthetic.py` crea file PD0 sintetici (correnti di marea + burst
+d'onda con Hm0 = 1 m, Tp = 8 s, provenienza 225°, beam verticale, byte corrotti):
+
+```bash
+python -m pytest -q tests
+```

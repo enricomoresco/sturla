@@ -1,0 +1,7 @@
+numpy>=1.24
+pandas>=2.0
+xarray>=2023.1
+netCDF4>=1.6
+scipy>=1.10
+matplotlib>=3.7
+pytest>=7  # solo per i test
