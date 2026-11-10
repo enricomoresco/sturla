@@ -47,9 +47,19 @@ def run_currents(a):
                            orientation=a.orientation)
         ds.to_netcdf(os.path.join(a.out, "currents_avg.nc"))
         if "corr_w4beam_vs_vbeam" in ds.attrs:
-            c = ds.attrs["corr_w4beam_vs_vbeam"]
-            print(f"  controllo trasformazione: correlazione w(4 beam) - velocita' beam verticale = {c:+.2f}"
-                  + ("  [OK]" if abs(c) > 0.7 else "  [BASSA: verificare trasformazione/orientamento]"))
+            at = ds.attrs
+            c, sv = at["corr_w4beam_vs_vbeam"], at["std_vbeam_top_bursts"]
+            print(f"  controllo trasformazione ({at['n_bursts_check']} burst piu' energetici): "
+                  f"correlazione w(4 beam) - w(beam verticale) = {c:+.2f}; dev. std w: "
+                  f"beam verticale {sv * 100:.1f} cm/s, 4 beam {at['std_w4beam_top_bursts'] * 100:.1f} cm/s")
+            if sv < 0.02:
+                print("    [NON INFORMATIVO: velocita' orbitali verticali troppo piccole nel periodo]")
+            elif abs(c) > 0.5:
+                print("    [OK: i 4 beam e il beam verticale vedono le stesse onde"
+                      + ("; segno opposto = convenzione di segno del beam verticale]" if c < 0 else "]"))
+            else:
+                print("    [BASSA: possibile problema di trasformazione/orientamento, oppure onde corte "
+                      "rispetto alla distanza fra i beam]")
     qc = qc_currents(ds, corr_min=a.corr_min, pg_min=a.pg_min, err_max=a.err_max,
                      tilt_max=a.tilt_max, p_min=a.p_min, declination=a.declination,
                      orientation=a.orientation, t_start=a.start, t_end=a.end)
@@ -77,6 +87,12 @@ def run_waves(a):
     path = os.path.join(a.out, "waves_bulk.nc")
     w.to_netcdf(path)
     print(f"  {w.sizes['time']} burst -> {path}")
+    if "surface_range_vb" in w:
+        dr = float(np.nanmedian(w.surface_range_vb - w.depth_sensor))
+        ff = float(np.nanmedian(w.surface_found_frac)) if "surface_found_frac" in w else np.nan
+        print(f"  controllo beam verticale: superficie trovata nel {ff * 100:.0f}% dei ping (mediana); "
+              f"distanza superficie - profondita' da pressione = {dr:+.2f} m "
+              "(atteso: piccolo, pari alla distanza verticale fra sensore di pressione e trasduttore)")
     r.close()
     return w
 

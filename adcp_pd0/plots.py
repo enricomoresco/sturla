@@ -161,46 +161,50 @@ def plot_current_summary(qc, path):
     _save(fig, path)
 
 
-def plot_waves_bulk(w, path):
-    has_vb = "Hm0_vb" in w
+def plot_waves_bulk(w, path, hm0_dir_min=0.25):
+    has_vb = "Hm0_vb" in w and np.isfinite(w.Hm0_vb).any()
     has_dir = "Dp" in w and np.isfinite(w.Dp).any()
     n = 3 + int(has_dir)
     fig, axs = plt.subplots(n, 1, figsize=(11, 2.2 * n), sharex=True, layout="constrained")
     t = w.time.values
+    fc = float(np.nanmedian(w.fcut)) if "fcut" in w else np.nan
+    lab_p = f"Hm0 da pressione (solo T > {1 / fc:.1f} s)" if np.isfinite(fc) and fc > 0 else "Hm0 da pressione"
     ax = axs[0]
-    ax.plot(t, w.Hm0, color=C1, marker="o", ms=2.5, label="Hm0 da pressione")
     if has_vb:
-        ax.plot(t, w.Hm0_vb, color=C2, marker="o", ms=2.5, label="Hm0 da beam verticale")
-        ax.legend(loc="best", ncols=2)
+        ax.plot(t, w.Hm0_vb, color=C1, marker="o", ms=2.5, label="Hm0 da beam verticale")
+    ax.plot(t, w.Hm0, color=C2 if has_vb else C1, marker="o", ms=2.5, label=lab_p)
+    ax.legend(loc="best", ncols=2)
     ax.set_ylabel("m")
     ax.set_title("Altezza d'onda significativa Hm0")
     ax = axs[1]
     if has_vb:
-        ax.plot(t, w.Tp_vb, color=C1, marker="o", ms=2.5, label="Tp beam verticale")
-        ax.plot(t, w.Tm02_vb, color=C2, marker="o", ms=2.5, label="Tm02 beam verticale")
-        ax.plot(t, w.Tp, color=C3, marker="o", ms=2.5, label="Tp pressione")
-        ax.legend(loc="best", ncols=3)
-        ax.set_title("Periodi")
+        ax.plot(t, w.Tp_vb, color=C1, marker="o", ms=2.5, label="Tp")
+        ax.plot(t, w.Tm02_vb, color=C2, marker="o", ms=2.5, label="Tm02")
+        ax.set_title("Periodi (beam verticale)")
     else:
         ax.plot(t, w.Tp, color=C1, marker="o", ms=2.5, label="Tp")
         ax.plot(t, w.Tm02, color=C2, marker="o", ms=2.5, label="Tm02")
-        ax.legend(loc="best", ncols=2)
         ax.set_title("Periodi (da pressione)")
+    ax.legend(loc="best", ncols=2)
     ax.set_ylabel("s")
     i = 2
     if has_dir:
         ax = axs[i]
-        ax.plot(t, w.Dp, "o", ms=3, color=C1, label="Dp")
-        ax.plot(t, w.Dm, "o", ms=3, color=C2, mfc="none", label="Dm")
+        hm = (w.Hm0_vb if has_vb else w.Hm0).values
+        strong = hm >= hm0_dir_min
+        ax.plot(t[~strong], w.Dp.values[~strong], "o", ms=2.5, color=AXIS,
+                label=f"Dp con Hm0 < {hm0_dir_min} m (poco affidabile)")
+        ax.plot(t[strong], w.Dp.values[strong], "o", ms=3.5, color=C1, label="Dp")
+        ax.plot(t[strong], w.Dm.values[strong], "o", ms=3.5, color=C2, mfc="none", label="Dm")
         ax.set_ylim(0, 360)
         ax.set_yticks([0, 90, 180, 270, 360])
         ax.set_ylabel("° (provenienza)")
-        ax.legend(loc="best", ncols=2)
+        ax.legend(loc="best", ncols=3)
         ref = "superficie beam verticale" if float(np.nanmax(w.get("dir_ref_vb", np.zeros(1)))) > 0 else "pressione"
         ax.set_title(f"Direzione di provenienza (cross-spettri {ref} - velocita')")
         i += 1
     ax = axs[i]
-    ax.plot(t, w.depth, color=C1)
+    ax.plot(t, w.depth, color=C1, marker="o", ms=2.5)
     ax.ticklabel_format(axis="y", useOffset=False)
     ax.set_ylabel("m")
     ax.set_title("Profondita' media per burst")
@@ -219,8 +223,11 @@ def plot_waves_spectrogram(w, path, var="S_p"):
     pc = ax.pcolormesh(w.time.values, f, np.where(good, S, np.nan).T, cmap=SEQ, shading="nearest",
                        norm=LogNorm(vmin=vmax / 1e3, vmax=vmax), rasterized=True)
     fig.colorbar(pc, ax=ax, pad=0.01).set_label("S(f) [m²/Hz]", color=INK2)
-    fmax = np.nanmax(w.fcut.values) if "fcut" in w else f.max()
-    ax.set_ylim(0, min(f.max(), fmax * 1.1 if np.isfinite(fmax) else f.max()))
+    if var == "S_p":
+        fmax = np.nanmax(w.fcut.values) if "fcut" in w else f.max()
+        ax.set_ylim(0, min(f.max(), fmax * 1.1 if np.isfinite(fmax) else f.max()))
+    else:
+        ax.set_ylim(0, min(f.max(), 0.6))
     ax.set_ylabel("Frequenza [Hz]")
     ax.set_title("Spettro di elevazione per burst" + (" (pressione)" if var == "S_p" else " (beam verticale)"))
     ax.grid(False)

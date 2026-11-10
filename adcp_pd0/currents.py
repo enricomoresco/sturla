@@ -191,14 +191,18 @@ def average_pings(reader, window_min: float | None = None, corr_min: int = 64,
                 out["pressure_std"].append(np.nanstd(ds.pressure.values[sel]) if "pressure" in ds else np.nan)
             out["time"].append(t_all[s] + (t_all[e - 1] - t_all[s]) / 2)
             out["n_pings"].append(len(sel))
-            # verifica della trasformazione: w dai 4 beam contro il beam verticale
-            if check_vb and "vb_vel" in ds and "vb_range" in ds and len(vbstat) < 50:
-                iv = np.argmin(np.abs(ds.vb_range.values - rng[len(rng) // 3]))
-                ic = len(rng) // 3
+            # verifica della trasformazione: w dai 4 beam contro il beam verticale, alla
+            # cella a ~70% della distanza dalla superficie (dove le velocità orbitali sono
+            # apprezzabili). Si salva per ogni burst; alla fine si usano i più energetici.
+            if check_vb and "vb_vel" in ds and "vb_range" in ds and "pressure" in ds:
+                d_s = float(np.nanmean(ds.pressure.values[sel])) * 1e4 / (RHO * G)
+                ic = int(np.argmin(np.abs(rng - 0.7 * d_s)))
+                iv = int(np.argmin(np.abs(ds.vb_range.values - rng[ic])))
                 x, y = ve[:, ic, 2], ds.vb_vel.values[sel, iv]
                 ok = np.isfinite(x) & np.isfinite(y)
-                if ok.sum() > 50 and np.std(x[ok]) > 0 and np.std(y[ok]) > 0:
-                    vbstat.append(np.corrcoef(x[ok], y[ok])[0, 1])
+                if ok.sum() > 100 and np.std(x[ok]) > 0 and np.std(y[ok]) > 0:
+                    vbstat.append((np.corrcoef(x[ok], y[ok])[0, 1], float(np.std(y[ok])),
+                                   float(np.std(x[ok]))))
         if verbose:
             print(f"  medie ping: gruppo {gi + 1}/{len(groups)} ({len(out['time'])} profili)", flush=True)
     attrs = dict(a)
@@ -206,7 +210,13 @@ def average_pings(reader, window_min: float | None = None, corr_min: int = 64,
                  avg_corr_min=corr_min, avg_min_good_frac=min_good_frac)
     attrs.pop("transformation_matrix", None)
     if vbstat:
-        attrs["corr_w4beam_vs_vbeam"] = float(np.median(vbstat))
+        st = np.array(vbstat)
+        top = st[np.argsort(st[:, 1])[::-1][:max(5, len(st) // 10)]]   # burst più energetici
+        attrs["corr_w4beam_vs_vbeam"] = float(np.median(top[:, 0]))
+        attrs["corr_w4beam_vs_vbeam_all"] = float(np.median(st[:, 0]))
+        attrs["std_vbeam_top_bursts"] = float(np.median(top[:, 1]))
+        attrs["std_w4beam_top_bursts"] = float(np.median(top[:, 2]))
+        attrs["n_bursts_check"] = int(len(top))
     dims = ("time", "cell", "beam")
     nb = out["vel"][0].shape[-1]
     res = xr.Dataset(
