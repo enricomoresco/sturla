@@ -180,7 +180,8 @@ def make_sentinel_like(path, bursts=8, interval_min=30, nping=1024, fs=2.0, dept
         for b in range(bursts):
             tb = t0 + timedelta(minutes=interval_min * b)
             ph = rng_.uniform(0, 2 * np.pi)
-            for i in range(nping):
+            npb = nping[b % len(nping)] if isinstance(nping, (list, tuple)) else nping
+            for i in range(npb):
                 tt = i / fs
                 eta = amp * np.cos(w * tt + ph)
                 uo = amp * w * np.cosh(k * z) / np.sinh(k * depth) * np.cos(w * tt + ph)

@@ -124,6 +124,16 @@ def analyze_waves(reader, hab: float = 0.5, p_atm: float = 0.0, nperseg: int = 2
     """
     t_all = reader.times()
     bursts, dt_med = find_bursts(t_all)
+    # i burst troppo corti per uno spettro (es. i burst da 180 ping per le sole correnti
+    # del Sentinel V) vengono esclusi dall'analisi onde
+    lengths = bursts[:, 1] - bursts[:, 0]
+    n_short = int((lengths < min_samples).sum())
+    bursts = bursts[lengths >= min_samples]
+    if verbose and n_short:
+        print(f"  onde: {len(bursts)} burst usati, {n_short} burst piu' corti di {min_samples} "
+              f"ping esclusi")
+    if len(bursts) == 0:
+        raise ValueError(f"nessun burst con almeno {min_samples} ping (min_samples)")
     fs = 1.0 / dt_med
     a = reader.attrs
     nseg = int(min(nperseg, 2 ** np.floor(np.log2(max(min_samples, 16)))))
@@ -263,7 +273,7 @@ def analyze_waves(reader, hab: float = 0.5, p_atm: float = 0.0, nperseg: int = 2
     if has_vb:
         out["S_vb"] = (("time", "freq"), np.array(S_v), dict(units="m2 Hz-1",
                        long_name="spettro elevazione da superficie (beam verticale)"))
-    out.attrs.update(dict(fs=fs, hab=hab, p_atm=p_atm, nperseg=nseg, fmin=fmin, fmax=fmax,
+    out.attrs.update(dict(n_short_bursts_skipped=n_short, fs=fs, hab=hab, p_atm=p_atm, nperseg=nseg, fmin=fmin, fmax=fmax,
                           kp2_min=kp2_min, puv_cell=-1 if puv_cell is None else puv_cell,
                           note="Dp/Dm: direzione di PROVENIENZA, gradi da Nord in senso orario"))
     return out

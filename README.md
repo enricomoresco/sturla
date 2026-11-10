@@ -84,6 +84,11 @@ Se `inspect` mostra **un solo stream** con `pings_per_ens 1`, dt 0.5 s e burst, 
   loro (≈ 2·r·tan 25°), confrontabile con la lunghezza d'onda delle onde corte; la
   direzione è quindi una stima di primo livello.
 
+Nel file di Sturla i burst sono di due tipi: **1024 ping (8.5 min)**, usati per le onde, e
+**180 ping (1.5 min)**, troppo corti per uno spettro. L'analisi onde usa solo i burst con
+almeno 256 ping (`n_short_bursts_skipped` in `waves_bulk.nc` conta gli esclusi); le correnti
+usano tutti i burst (`n_pings` in `currents_avg.nc` dice su quanti ping è fatta ogni media).
+
 Comando consigliato:
 
 ```bash

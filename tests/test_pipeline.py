@@ -158,3 +158,20 @@ def test_trash_and_range(tmp_path):
     assert 1 <= ok2.sum() <= tr["bursts"]
     assert np.allclose(w2.Hm0_vb.values[ok2], tr["Hs"], rtol=0.12)
     assert np.allclose(w2.Dp.values[ok2], tr["dir_from"], atol=5)
+
+
+def test_mixed_bursts(tmp_path):
+    """Come il file reale: burst da 1024 ping (onde) alternati a burst da 180 ping."""
+    from synthetic import make_sentinel_like
+    from adcp_pd0.currents import average_pings
+    f = tmp_path / "mix.pd0"
+    tr = make_sentinel_like(str(f), bursts=9, interval_min=40, nping=[1024, 180, 180], depth=34.5)
+    out = tmp_path / "out"
+    convert_files([str(f)], str(out), verbose=False)
+    r = StreamReader(str(out), pick_stream(str(out), "waves"))
+    w = analyze_waves(r, hab=0.5, puv_cell="auto", verbose=False)
+    assert w.sizes["time"] == 3 and w.attrs["n_short_bursts_skipped"] == 6
+    assert np.allclose(w.Hm0_vb, 1.0, rtol=0.12) and np.allclose(w.Dp, tr["dir_from"], atol=5)
+    avg = average_pings(r, verbose=False)
+    assert avg.sizes["time"] == 9
+    assert sorted(set(avg.n_pings.values.tolist())) == [180, 1024]
