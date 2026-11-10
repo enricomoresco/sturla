@@ -163,22 +163,25 @@ def plot_burst_check(res, t, path, title=""):
 
 
 def check_transform(reader, out_dir=None, n_bursts=10, min_pings=256, orientation=None,
-                    corr_min=64, verbose=True):
+                    corr_min=64, deployment=None, verbose=True):
     """Esegue ``burst_check`` sui burst lunghi più energetici e (opzionale) salva il grafico."""
     import os
     from .waves import find_bursts
     t = reader.times()
     b, dt = find_bursts(t)
     b = b[(b[:, 1] - b[:, 0]) >= min_pings]
+    if deployment is not None:
+        from .deployment import in_position
+        b = b[in_position(t[b[:, 0]], deployment) & in_position(t[b[:, 1] - 1], deployment)]
     if len(b) == 0:
         return None
-    # energia: varianza della pressione non serve in acqua profonda -> usa la superficie;
-    # per non leggere tutto, si stima dall'eco del beam verticale su un ping ogni 4
+    # energia: la pressione non serve in acqua profonda -> deviazione standard della superficie
+    # tracciata con l'eco del beam verticale
     energy = []
     for s, e in b:
         ds = reader.load(["vb_echo", "pressure"], t[s], t[e - 1] + np.timedelta64(1, "us"))
         d_s = float(np.nanmean(ds.pressure.values)) * 1e4 / (RHO * G)
-        r = surface_from_vb(ds.vb_echo.values[::4], ds.vb_range.values, np.full(len(ds.time[::4]), d_s))
+        r = surface_from_vb(ds.vb_echo.values, ds.vb_range.values, np.full(ds.sizes["time"], d_s))
         energy.append(np.nanstd(_despike(r)))
     order = np.argsort(np.nan_to_num(energy, nan=-1))[::-1][:n_bursts]
     names = ["vel", "corr", "vb_vel", "vb_corr", "vb_echo", "pressure", "heading", "pitch", "roll"]

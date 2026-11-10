@@ -25,7 +25,7 @@ python process_pd0.py inspect /percorso/dati/*.pd0 --max-mb 200
 2. **Tutto in un comando** (conversione + QC correnti + onde + grafici):
 
 ```bash
-python process_pd0.py all /percorso/dati/ -o out --hab 0.6 --metadata metadata.json --start 2025-06-01T12:00 --end 2025-07-15T08:00
+python process_pd0.py all /percorso/dati/ -o out --hab 0.6 --metadata metadata.json
 ```
 
    oppure i singoli passi: `convert`, `currents`, `waves`, `plots`, `archive`, `check`
@@ -35,7 +35,9 @@ Parametri principali (`python process_pd0.py all -h` per l'elenco completo):
 
 | opzione | significato | default |
 |---|---|---|
-| `--start`, `--end` | periodo utile (esclude messa in acqua/recupero) | tutto |
+| `--start`, `--end` | correzione manuale del periodo in posizione | automatico |
+| `--trim` | elimina i dati fuori posizione invece di marcarli (flag 4) | no |
+| `--redetect` | ricalcola il periodo in posizione | no |
 | `--hab` | altezza del sensore/trasduttore dal fondo [m] | 0.5 |
 | `--p-atm` | offset di pressione da sottrarre [dbar] (se il sensore non è stato azzerato in aria) | 0 |
 | `--declination` | declinazione magnetica [°] se **non** già impostata nello strumento (comando EB) | 0 |
@@ -45,6 +47,27 @@ Parametri principali (`python process_pd0.py all -h` per l'elenco completo):
 | `--avg-minutes` | se le correnti si ricavano dai ping: finestre di N minuti invece dell'intero burst | burst |
 | `--currents-stream`, `--waves-stream` | forza la scelta degli stream (nomi da `inspect`) | automatico |
 | `--orientation up/down` | forza l'orientamento | dal fixed leader |
+
+## Periodo in posizione (messa in acqua e recupero)
+
+Lo strumento registra anche in aria, durante la discesa e durante il recupero. Il periodo
+in cui è **fermo sul fondo** viene individuato **automaticamente** (passo `deployment`,
+eseguito anche da `currents`/`waves`) su mediane al minuto di pressione e inclinazione:
+
+- in acqua: pressione > `--p-min` (1 dbar);
+- in posizione: pressione entro max(2 dbar, 10%) dalla pressione di lavoro (mediana in
+  acqua), quindi la marea non conta; inclinazione < 15° e stabile (±3°);
+- condizioni vere per almeno 30 minuti consecutivi; margine di sicurezza di 10 minuti
+  dopo l'inizio e prima della fine.
+
+Risultato in `out/deployment.json` e grafico `out/figures/deployment.png` (in grigio i
+periodi fuori posizione). I dati fuori posizione **restano nei file con flag 4**
+(`deployment_qc`, `vel_qc`, `wave_qc`); con `--trim` vengono eliminati. Se serve, il
+risultato si corregge con `--start`/`--end`.
+
+```bash
+python process_pd0.py deployment -o out
+```
 
 ## Elaborare solo una porzione del file
 
@@ -103,7 +126,7 @@ grafico in `figures/check_transform.png` (burst più energetico).
 Comando consigliato:
 
 ```bash
-python process_pd0.py all sturla_20260707T125042.pd0 -o out --hab <altezza sul fondo> --puv-cell auto --start <...> --end <...>
+python process_pd0.py all sturla_20260707T125042.pd0 -o out --hab <altezza sul fondo> --puv-cell auto --metadata metadata.json
 ```
 
 ## Output (`out/`)

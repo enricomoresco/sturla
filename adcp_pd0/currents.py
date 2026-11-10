@@ -15,11 +15,12 @@ G = 9.81
 def qc_currents(ds: xr.Dataset, corr_min: int = 64, pg_min: float = 50.0, err_max: float = 0.20,
                 tilt_max: float = 20.0, p_min: float = 1.0, sidelobe: bool = True,
                 surface_margin_cells: float = 1.0, declination: float = 0.0,
-                orientation: str | None = None, t_start=None, t_end=None,
+                orientation: str | None = None, deployment: dict | None = None, trim: bool = False,
                 xducer_hab: float = 0.0) -> xr.Dataset:
     """QC dei profili di velocità.
 
-    - taglio temporale (messa in acqua / recupero) e scarto ensemble con pressione < ``p_min``
+    - fuori dal periodo in posizione (``deployment``, vedi deployment.py) e con pressione
+      < ``p_min``: tutte le celle marcate cattive (flag_position); con ``trim`` eliminate
     - eventuale trasformazione in coordinate Earth e rotazione per la declinazione
     - maschere: correlazione minima (su tutti i beam), percent good (3+4 beam), velocità
       d'errore, inclinazione, contaminazione side-lobe vicino alla superficie
@@ -27,11 +28,16 @@ def qc_currents(ds: xr.Dataset, corr_min: int = 64, pg_min: float = 50.0, err_ma
     medie sulla verticale e i flag di QC.
     """
     a = dict(ds.attrs)
-    if t_start is not None or t_end is not None:
-        ds = ds.sel(time=slice(t_start, t_end))
     n0 = ds.sizes["time"]
+    from .deployment import in_position
+    pos = np.ones(n0, bool)
+    if deployment is not None:
+        pos &= in_position(ds.time.values, deployment)
     if "pressure" in ds and float(ds.pressure.max()) > 0:
-        ds = ds.isel(time=np.flatnonzero(ds.pressure.values >= p_min))
+        pos &= ds.pressure.values >= p_min
+    if trim:
+        ds = ds.isel(time=np.flatnonzero(pos))
+        pos = pos[pos]
     vel = ds.vel.values
     head, pitch, roll = ds["heading"].values, ds["pitch"].values, ds["roll"].values
     vel = to_earth(vel, a, head, pitch, roll, orientation)
@@ -55,6 +61,9 @@ def qc_currents(ds: xr.Dataset, corr_min: int = 64, pg_min: float = 50.0, err_ma
         f = np.abs(err) > err_max
         flags["flag_err"] = f
         bad |= f
+    f = np.broadcast_to((~pos)[:, None], u.shape)
+    flags["flag_position"] = f
+    bad |= f
     tilt = np.hypot(pitch, roll)
     f = np.broadcast_to((tilt > tilt_max)[:, None], u.shape)
     flags["flag_tilt"] = f
@@ -112,10 +121,15 @@ def qc_currents(ds: xr.Dataset, corr_min: int = 64, pg_min: float = 50.0, err_ma
     out["speed_davg"] = ("time", np.hypot(ub, vb).astype(np.float32), dict(units="m s-1"))
     out["dir_davg"] = ("time", np.mod(np.degrees(np.arctan2(ub, vb)), 360).astype(np.float32),
                        dict(units="degree"))
-    out["valid_fraction"] = ("cell", np.isfinite(u).mean(axis=0).astype(np.float32))
+    out["in_position"] = ("time", pos.astype(np.uint8), dict(long_name="1 = strumento in posizione sul fondo"))
+    out["valid_fraction"] = ("cell", np.isfinite(u[pos]).mean(axis=0).astype(np.float32) if pos.any()
+                             else np.zeros(u.shape[1], np.float32))
     out.attrs.update(dict(qc_corr_min=corr_min, qc_pg_min=pg_min, qc_err_max=err_max,
                           qc_tilt_max=tilt_max, qc_p_min=p_min, declination=declination,
                           n_ensembles_raw=n0, coord_system_out="earth"))
+    if deployment is not None:
+        out.attrs.update(deployment_start=deployment["start"], deployment_end=deployment["end"],
+                         deployment_method=deployment.get("method", ""))
     return out
 
 

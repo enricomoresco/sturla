@@ -51,6 +51,9 @@ def convert_files(files, outdir: str, chunk_bytes: float = 150e6, verbose: bool 
     if not files:
         raise FileNotFoundError("nessun file PD0 trovato")
     os.makedirs(os.path.join(outdir, "raw"), exist_ok=True)
+    dep = os.path.join(outdir, "deployment.json")
+    if os.path.exists(dep):
+        os.remove(dep)          # nuovi dati: il periodo in posizione va ricalcolato
     inv = dict(files={}, streams={})
     for f in files:
         t0 = _time.time()

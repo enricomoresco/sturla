@@ -13,6 +13,7 @@ import os
 import sys
 
 import numpy as np
+import xarray as xr
 
 from adcp_pd0 import (convert_files, inspect_files, StreamReader, pick_stream, qc_currents,
                       analyze_waves)
@@ -26,6 +27,11 @@ def _aux_dataset(reader, max_points=200_000):
     if ds.sizes["time"] > max_points:
         ds = ds.isel(time=slice(None, None, ds.sizes["time"] // max_points + 1))
     return ds
+
+
+def _deployment(a, reader):
+    from adcp_pd0.deployment import get_deployment
+    return get_deployment(a.out, reader, start=a.start, end=a.end, redetect=a.redetect, p_min=a.p_min)
 
 
 def run_currents(a):
@@ -43,6 +49,7 @@ def run_currents(a):
         print(f"\nCorrenti: medie dei ping singoli dello stream {name} "
               + (f"su finestre di {a.avg_minutes} min" if a.avg_minutes else "su ogni burst"))
         r = StreamReader(a.out, name)
+        dep = _deployment(a, r)
         ds = average_pings(r, window_min=a.avg_minutes, corr_min=a.corr_min,
                            orientation=a.orientation)
         ds.to_netcdf(os.path.join(a.out, "currents_avg.nc"))
@@ -50,15 +57,18 @@ def run_currents(a):
             from adcp_pd0.diagnostics import check_transform
             print("  controllo trasformazione con la superficie del beam verticale (dη/dt):")
             check_transform(r, os.path.join(a.out, "figures"), orientation=a.orientation,
-                            corr_min=a.corr_min)
+                            corr_min=a.corr_min, deployment=dep)
+    dep = _deployment(a, r)
     qc = qc_currents(ds, corr_min=a.corr_min, pg_min=a.pg_min, err_max=a.err_max,
                      tilt_max=a.tilt_max, p_min=a.p_min, declination=a.declination,
-                     orientation=a.orientation, t_start=a.start, t_end=a.end)
+                     orientation=a.orientation, deployment=dep, trim=a.trim)
     path = os.path.join(a.out, "currents_qc.nc")
     enc = {k: dict(zlib=True, complevel=1) for k in qc.data_vars}
     qc.to_netcdf(path, encoding=enc)
-    good = np.isfinite(qc.u.values).mean() * 100
-    print(f"  {qc.sizes['time']:,} profili dopo il taglio, {good:.1f}% celle valide -> {path}")
+    ip = qc.in_position.values.astype(bool)
+    good = np.isfinite(qc.u.values[ip]).mean() * 100 if ip.any() else 0.0
+    print(f"  {qc.sizes['time']:,} profili ({ip.sum():,} in posizione, {(~ip).sum():,} fuori posizione "
+          f"{'eliminati' if a.trim else 'con flag 4'}); celle valide in posizione {good:.1f}% -> {path}")
     r.close()
     return qc
 
@@ -73,8 +83,22 @@ def run_waves(a):
     w = analyze_waves(r, hab=a.hab, p_atm=a.p_atm, nperseg=a.nperseg, fmin=a.fmin, fmax=a.fmax,
                       kp2_min=a.kp2_min, use_vb=not a.no_vb, p_min=a.p_min, puv_cell=a.puv_cell,
                       orientation=a.orientation, declination=a.declination, dir_ref=a.dir_ref)
-    if a.start or a.end:
-        w = w.sel(time=slice(a.start, a.end))
+    from adcp_pd0.deployment import in_position
+    dep = _deployment(a, r)
+    pos = in_position(w.time.values, dep)
+    if "depth_sensor" in w:
+        pos &= np.nan_to_num(w.depth_sensor.values) * 1025 * 9.81 / 1e4 >= a.p_min
+    if a.trim:
+        w = w.isel(time=np.flatnonzero(pos))
+        pos = pos[pos]
+    else:
+        # fuori posizione: valori rimossi, la riga resta (flag 4 nell'archivio)
+        for k in w.data_vars:
+            if "time" in w[k].dims and k not in ("n", "duration_s", "depth", "depth_sensor", "p_std"):
+                w[k] = w[k].where(xr.DataArray(pos, dims="time"))
+    w["in_position"] = ("time", pos.astype(np.uint8), dict(long_name="1 = strumento in posizione sul fondo"))
+    w.attrs.update(deployment_start=dep["start"], deployment_end=dep["end"],
+                   deployment_method=dep.get("method", ""))
     path = os.path.join(a.out, "waves_bulk.nc")
     w.to_netcdf(path)
     print(f"  {w.sizes['time']} burst -> {path}")
@@ -118,8 +142,13 @@ def main(argv=None):
 
     def common(sp):
         sp.add_argument("-o", "--out", required=True, help="cartella di output")
-        sp.add_argument("--start", default=None, help="inizio periodo utile (es. 2025-06-01T12:00)")
-        sp.add_argument("--end", default=None, help="fine periodo utile")
+        sp.add_argument("--start", default=None,
+                        help="correzione manuale dell'inizio del periodo in posizione (default: automatico)")
+        sp.add_argument("--end", default=None, help="correzione manuale della fine del periodo in posizione")
+        sp.add_argument("--trim", action="store_true",
+                        help="elimina i dati fuori posizione invece di marcarli con flag 4")
+        sp.add_argument("--redetect", action="store_true",
+                        help="ricalcola il periodo in posizione (ignora out/deployment.json)")
         sp.add_argument("--orientation", choices=["up", "down"], default=None,
                         help="forza l'orientamento (default: dal fixed leader)")
         sp.add_argument("--declination", type=float, default=0.0,
@@ -154,6 +183,7 @@ def main(argv=None):
     pc.add_argument("--range", dest="byte_range", default=None, help=RANGE_HELP)
     for n in ("currents", "waves", "plots"):
         common(sub.add_parser(n))
+    common(sub.add_parser("deployment", help="individua il periodo in posizione (deployment.json + grafico)"))
     par = sub.add_parser("archive", help="file d'archivio NetCDF (CF) e CSV")
     common(par)
     par.add_argument("--metadata", default=None, help="file JSON di metadati (vedi metadata_template.json)")
@@ -180,11 +210,15 @@ def main(argv=None):
     elif a.cmd == "archive":
         from adcp_pd0.archive import load_metadata, write_archive
         write_archive(a.out, load_metadata(a.metadata), hab=a.hab)
+    elif a.cmd == "deployment":
+        from adcp_pd0.deployment import get_deployment
+        name = pick_stream(a.out, "currents", a.currents_stream) or pick_stream(a.out, "waves", a.waves_stream)
+        get_deployment(a.out, StreamReader(a.out, name), redetect=True, p_min=a.p_min)
     elif a.cmd == "check":
         from adcp_pd0.diagnostics import check_transform
         r = StreamReader(a.out, pick_stream(a.out, "waves", a.waves_stream))
         check_transform(r, os.path.join(a.out, "figures"), n_bursts=a.n_bursts,
-                        orientation=a.orientation, corr_min=a.corr_min)
+                        orientation=a.orientation, corr_min=a.corr_min, deployment=_deployment(a, r))
     elif a.cmd == "all":
         convert_files(a.inputs, a.out, byte_range=a.byte_range)
         qc = run_currents(a)

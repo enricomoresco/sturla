@@ -147,7 +147,8 @@ def make_file(path, hours=12, depth=15.0, hab=0.5, Hs=1.0, Tp=8.0, dir_from=225.
 
 def make_sentinel_like(path, bursts=8, interval_min=30, nping=1024, fs=2.0, depth=20.0, hab=0.5,
                        Hs=1.0, Tp=6.0, dir_from=200.0, U=0.2, V=-0.1,
-                       heading=30.0, pitch=2.0, roll=-3.0, seed=0):
+                       heading=30.0, pitch=2.0, roll=-3.0, seed=0, t0=None, nc=None, nvb=None,
+                       mode="normal"):
     """Come il file reale ispezionato: un solo stream di ping singoli a 2 Hz in burst,
     coordinate BEAM, beam verticale, matrice di trasformazione (0x3200), blocchi Sentinel
     sconosciuti, niente percent good, fixed/variable leader più lunghi."""
@@ -156,11 +157,11 @@ def make_sentinel_like(path, bursts=8, interval_min=30, nping=1024, fs=2.0, dept
     from adcp_pd0.transform import theoretical_matrix, inst_to_earth_matrix
 
     rng_ = np.random.default_rng(seed)
-    t0 = datetime(2026, 7, 10)
+    t0 = t0 or datetime(2026, 7, 10)
     xd = depth - hab
     cs, b1, csvb, r0vb = 50, 168, 50, 100
-    nc = int((xd + 2 - b1 / 100) / 0.5) + 1          # le celle arrivano oltre la superficie
-    nvb = int((xd + 3 - r0vb / 100) / 0.5) + 1
+    nc = nc or int((xd + 2 - b1 / 100) / 0.5) + 1          # le celle arrivano oltre la superficie
+    nvb = nvb or int((xd + 3 - r0vb / 100) / 0.5) + 1
     r_c = (b1 + np.arange(nc) * cs) / 100
     r_vb = (r0vb + np.arange(nvb) * csvb) / 100
     T = theoretical_matrix(25, True)
@@ -198,9 +199,18 @@ def make_sentinel_like(path, bursts=8, interval_min=30, nping=1024, fs=2.0, dept
                 corr = np.full((nc, 4), 110)
                 corr[side] = 30
                 p_dbar = RHO * G * (xd + eta * np.cosh(k * hab) / np.cosh(k * depth)) / 1e4
+                if mode == "dry":          # in aria: pressione ~0, strumento inclinato, solo rumore
+                    p_dbar, p_, r_ = abs(0.01 + rng_.normal(0, 0.005)), 40.0, 10.0
+                    vel_mm = rng_.integers(-3000, 3000, vel_mm.shape)
+                    corr[:] = 20
+                elif mode == "descent":    # discesa: pressione che cresce, assetto variabile
+                    p_dbar = p_dbar * i / npb
+                    p_, r_ = 20 * np.sin(i / 7.0), 15 * np.cos(i / 5.0)
                 fl = _fixed(nc, 4, 1, cs, b1, ex=0) + b"\x00"         # 60 B
                 vl = _variable(n, tb + timedelta(seconds=tt), p_dbar, h_, p_, r_) + b"\x00"  # 66 B
                 echo_vb = (60 + 120 * np.exp(-0.5 * ((r_vb - (xd + eta)) / 0.4) ** 2)).astype(int)
+                if mode == "dry":
+                    echo_vb = rng_.integers(40, 70, nvb)
                 vbv = np.interp(r_vb + hab, z, wo)
                 lead = bytearray(40)
                 struct.pack_into("<HHHHH", lead, 0, 0x0F01, nvb, 1, csvb, r0vb)
@@ -219,22 +229,32 @@ def make_sentinel_like(path, bursts=8, interval_min=30, nping=1024, fs=2.0, dept
 
 
 def make_trashy(path, **kw):
-    """File reale-simile con spazzatura in testa e in coda: byte casuali + ensemble validi
-    ma registrati fuori acqua (pressione ~0, tempi prima/dopo il deployment)."""
+    """Come il file reale: nello STESSO stream, strumento in aria prima e dopo il deployment,
+    una discesa e una risalita, più byte casuali in testa e in coda."""
     import os
     import tempfile
     rng_ = np.random.default_rng(1)
+    t0 = datetime(2026, 7, 10)
+    depth, hab = kw.get("depth", 20.0), kw.get("hab", 0.5)
+    xd = depth - hab
+    nc = int((xd + 2 - 1.68) / 0.5) + 1
+    nvb = int((xd + 3 - 1.0) / 0.5) + 1
+    common = dict(depth=depth, hab=hab, nc=nc, nvb=nvb, interval_min=30)
+    parts = []
     with tempfile.TemporaryDirectory() as d:
-        good = os.path.join(d, "good.pd0")
-        truth = make_sentinel_like(good, **kw)
-        dry = os.path.join(d, "dry.pd0")
-        # stesso strumento ma in aria: pressione ~0, 2 burst
-        make_sentinel_like(dry, bursts=2, depth=0.6, hab=0.5, Hs=0.0, seed=5)
-        body, dry_b = open(good, "rb").read(), open(dry, "rb").read()
+        def mk(name, **k):
+            f = os.path.join(d, name)
+            truth = make_sentinel_like(f, **{**common, **k})
+            parts.append(open(f, "rb").read())
+            return truth
+        mk("dry1.pd0", bursts=4, mode="dry", t0=t0 - timedelta(hours=3), seed=11)
+        mk("down.pd0", bursts=1, mode="descent", t0=t0 - timedelta(minutes=40), seed=12)
+        truth = mk("good.pd0", t0=t0, **{k: v for k, v in kw.items() if k not in ("depth", "hab")})
+        t_end = t0 + timedelta(minutes=30 * truth["bursts"])
+        mk("up.pd0", bursts=1, mode="descent", t0=t_end + timedelta(minutes=10), seed=13)
+        mk("dry2.pd0", bursts=4, mode="dry", t0=t_end + timedelta(hours=1), seed=14)
     trash = lambda n: rng_.integers(0, 256, n, dtype=np.uint8).tobytes()
-    head = trash(300_000) + dry_b + trash(50_000)
-    tail = trash(70_000) + dry_b + trash(300_000)
     with open(path, "wb") as f:
-        f.write(head + body + tail)
-    truth.update(head_bytes=len(head), tail_bytes=len(tail), body_bytes=len(body))
+        f.write(trash(300_000) + b"".join(parts) + trash(300_000))
+    truth.update(t0=t0, t_end=t_end)
     return truth

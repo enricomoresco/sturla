@@ -57,6 +57,9 @@ def _global_attrs(md: dict, ds_src: xr.Dataset, kind: str, t: np.ndarray) -> dic
         "processing_level": "dati controllati automaticamente (QC), non validati manualmente",
         "source_file": str(ds_src.attrs.get("source_file", "")),
     }
+    for k in ("deployment_start", "deployment_end", "deployment_method"):
+        if ds_src.attrs.get(k):
+            a[k] = str(ds_src.attrs[k])
     for k in ("instrument_height_above_bed_m", "institution", "project", "creator_name", "creator_email", "license", "deployment_id",
               "deployment_start", "deployment_end", "time_zone", "comment",
               "geospatial_vertical_reference", "magnetic_declination_deg", "magnetic_declination_applied"):
@@ -116,6 +119,14 @@ def currents_archive(qc: xr.Dataset, md: dict, hab: float) -> xr.Dataset:
     if "echo_mean" in qc:
         ds["echo"] = (dims, V("echo_mean"), dict(long_name="intensita' eco media sui 4 beam", units="count"))
     ds["vel_qc"] = (dims, flag, dict(long_name="flag di qualita' delle velocita'", **FLAG_ATTRS))
+    if "in_position" in qc:
+        dq = np.where(qc.in_position.values.astype(bool), 1, 4).astype(np.int8)
+    else:
+        dq = np.full(len(t), 2, np.int8)
+    ds["deployment_qc"] = ("time", dq, dict(
+        long_name="flag strumento in posizione sul fondo",
+        comment="4 = fuori posizione (in aria, discesa, recupero): tutti i dati di quell'istante sono da scartare",
+        **FLAG_ATTRS))
     ts = dict(
         temperature=("sea_water_temperature", "temperatura dell'acqua al fondo (sensore dello strumento)", "degree_Celsius"),
         pressure=("sea_water_pressure", "pressione al sensore (media sul burst)", "dbar"),
@@ -125,7 +136,8 @@ def currents_archive(qc: xr.Dataset, md: dict, hab: float) -> xr.Dataset:
     )
     for k, (sn, ln, u) in ts.items():
         if k in qc:
-            ds[k] = ("time", V(k), dict(standard_name=sn, long_name=ln, units=u))
+            ds[k] = ("time", V(k), dict(standard_name=sn, long_name=ln, units=u,
+                                        ancillary_variables="deployment_qc"))
     if "pressure" in qc:
         d = qc.pressure.values * 1e4 / (1025.0 * 9.81) + hab
         ds["water_depth"] = ("time", d.astype(np.float32), dict(
@@ -178,6 +190,8 @@ def waves_archive(w: xr.Dataset, md: dict, hm0_dir_min: float = 0.25) -> xr.Data
     flag = np.where(np.isfinite(hm), 1, 9).astype(np.int8)
     if has_vb and "surface_found_frac" in w:
         flag = np.where(np.isfinite(hm) & (w.surface_found_frac.values < 0.9), 3, flag).astype(np.int8)
+    if "in_position" in w:
+        flag = np.where(w.in_position.values.astype(bool), flag, 4).astype(np.int8)
     ds["wave_qc"] = ("time", flag, dict(long_name="flag di qualita' dei parametri d'onda",
                                         comment="3 = superficie trovata in meno del 90% dei ping", **FLAG_ATTRS))
     if "Dp" in w:
@@ -190,6 +204,8 @@ def waves_archive(w: xr.Dataset, md: dict, hm0_dir_min: float = 0.25) -> xr.Data
             long_name="direzione media di provenienza, da Nord orario", units="degree",
             ancillary_variables="direction_qc"))
         dflag = np.where(np.isfinite(w.Dp.values), np.where(hm < hm0_dir_min, 3, 1), 9).astype(np.int8)
+        if "in_position" in w:
+            dflag = np.where(w.in_position.values.astype(bool), dflag, 4).astype(np.int8)
         ds["direction_qc"] = ("time", dflag, dict(long_name="flag di qualita' delle direzioni",
                                                    comment=f"3 = Hm0 < {hm0_dir_min} m (poca energia)", **FLAG_ATTRS))
     if has_vb:
@@ -264,7 +280,7 @@ def write_archive(outdir: str, md: dict, hab: float, verbose: bool = True) -> li
         base = os.path.join(adir, f"{sid}_{fmt(c.time.values.min())}_{fmt(c.time.values.max())}")
         c.to_netcdf(base + "_currents.nc", encoding=_encoding(c))
         written.append(base + "_currents.nc")
-        cols = [k for k in ("temperature", "pressure", "water_depth", "heading", "pitch", "roll", "n_pings",
+        cols = [k for k in ("deployment_qc", "temperature", "pressure", "water_depth", "heading", "pitch", "roll", "n_pings",
                             "u_davg", "v_davg", "speed_davg", "dir_davg") if k in c]
         df = c[cols].to_dataframe()[cols]
         units = ", ".join(f"{k} [{c[k].attrs.get('units', '')}]" for k in cols)

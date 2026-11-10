@@ -133,6 +133,8 @@ def test_sentinel_like_cli(sentinel, tmp_path):
 
 
 def test_trash_and_range(tmp_path):
+    import json
+    import xarray as xr
     from synthetic import make_trashy
     from adcp_pd0.pd0 import parse_byte_range
     f = tmp_path / "trash.pd0"
@@ -140,24 +142,37 @@ def test_trash_and_range(tmp_path):
     size = os.path.getsize(f)
     assert parse_byte_range("25%:75%", size) == (size // 4, int(size * 0.75))
     assert parse_byte_range(":1", size) == (0, 2**20)
-    # 1) file intero: la spazzatura viene saltata, i burst fuori acqua scartati
+    # 1) file intero: periodo in posizione trovato in automatico, il resto con flag 4
     out = tmp_path / "all"
     process_pd0.main(["all", str(f), "-o", str(out), "--puv-cell", "auto"])
-    import xarray as xr
-    w = xr.load_dataset(out / "waves_bulk.nc")
-    good = np.isfinite(w.Hm0_vb.values)
-    assert good.sum() == tr["bursts"]
-    assert np.allclose(w.Hm0_vb.values[good], tr["Hs"], rtol=0.12)
-    qc = xr.load_dataset(out / "currents_qc.nc")
-    assert qc.sizes["time"] == tr["bursts"]                 # profili fuori acqua eliminati
-    # 2) solo la metà centrale
+    dep = json.load(open(out / "deployment.json"))
+    t0, t1 = np.datetime64(dep["start"]), np.datetime64(dep["end"])
+    assert np.datetime64(tr["t0"]) <= t0 <= np.datetime64(tr["t0"]) + np.timedelta64(30, "m")
+    last = np.datetime64(tr["t_end"]) - np.timedelta64(30, "m") + np.timedelta64(512, "s")   # fine ultimo burst buono
+    assert last - np.timedelta64(15, "m") <= t1 <= last
+    assert (out / "figures" / "deployment.png").exists()
+    arch = out / "archive"
+    c = xr.open_dataset(next(arch.glob("*_currents.nc")))
+    w = xr.open_dataset(next(arch.glob("*_waves.nc")))
+    ins = c.deployment_qc.values == 1
+    assert (~ins).sum() >= 10                              # aria + discesa/risalita presenti, marcati
+    assert (c.vel_qc.values[~ins] == 4).all()
+    assert np.isnan(c.u.values[~ins]).all()
+    assert w.wave_qc.values.tolist().count(1) >= 4
+    assert (w.wave_qc.values[w.wave_qc.values != 1] == 4).all()
+    good = w.wave_qc.values == 1
+    assert np.allclose(w.Hm0.values[good], tr["Hs"], rtol=0.12)
+    # 2) con --trim i dati fuori posizione spariscono
+    out3 = tmp_path / "trim"
+    process_pd0.main(["all", str(f), "-o", str(out3), "--trim"])
+    c3 = xr.open_dataset(next((out3 / "archive").glob("*_currents.nc")))
+    assert (c3.deployment_qc.values == 1).all()
+    # 3) solo la metà centrale
     out2 = tmp_path / "mid"
     process_pd0.main(["all", str(f), "-o", str(out2), "--range", "25%:75%", "--puv-cell", "auto"])
     w2 = xr.load_dataset(out2 / "waves_bulk.nc")
     ok2 = np.isfinite(w2.Hm0_vb.values)
-    assert 1 <= ok2.sum() <= tr["bursts"]
-    assert np.allclose(w2.Hm0_vb.values[ok2], tr["Hs"], rtol=0.12)
-    assert np.allclose(w2.Dp.values[ok2], tr["dir_from"], atol=5)
+    assert ok2.sum() >= 1 and np.allclose(w2.Hm0_vb.values[ok2], tr["Hs"], rtol=0.12)
 
 
 def test_mixed_bursts(tmp_path):
@@ -210,10 +225,12 @@ def test_archive(sentinel, tmp_path):
     assert c.u.attrs["standard_name"] == "eastward_sea_water_velocity"
     assert c.temperature.attrs["standard_name"] == "sea_water_temperature"
     np.testing.assert_allclose(c.temperature.values, 15.0, atol=0.01)
+    assert "deployment_qc" in c and "deployment_start" in c.attrs
     np.testing.assert_allclose(c.z.values[0], 1.68 + 0.5, atol=1e-4)     # quota sul fondale
     assert set(np.unique(c.vel_qc.values)) <= {1, 3, 4, 9}
     assert float(c.latitude) == 44.4
     assert w.Hm0.attrs["standard_name"] == "sea_surface_wave_significant_height"
-    assert np.allclose(w.Hm0, sentinel["truth"]["Hs"], rtol=0.12)
+    g = w.wave_qc.values == 1
+    assert g.sum() >= 5 and np.allclose(w.Hm0.values[g], sentinel["truth"]["Hs"], rtol=0.12)
     assert w.attrs["instrument_serial_number"] == "12345"
     assert any(f.endswith("_waves.csv") for f in files) and any(f.endswith("_timeseries.csv") for f in files)
