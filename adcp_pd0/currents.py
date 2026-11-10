@@ -127,6 +127,14 @@ def qc_currents(ds: xr.Dataset, corr_min: int = 64, pg_min: float = 50.0, err_ma
     out["dir_davg"] = ("time", np.mod(np.degrees(np.arctan2(ub, vb)), 360).astype(np.float32),
                        dict(units="degree"))
     out["in_position"] = ("time", pos.astype(np.uint8), dict(long_name="1 = strumento in posizione sul fondo"))
+    # movimento del telaio: intervallo di media che si sovrappone a un evento -> sospetto
+    mot = np.zeros(out.sizes["time"], bool)
+    if deployment is not None and deployment.get("motion_events"):
+        from .deployment import motion_overlap
+        half = np.timedelta64(int(round(a.get("avg_bin_minutes", 0) * 30)), "s")
+        tt = out.time.values
+        mot = motion_overlap(tt - half, tt + half, deployment)
+    out["flag_motion"] = ("time", mot.astype(np.uint8), dict(long_name="1 = telaio in movimento nell'intervallo"))
     out["valid_fraction"] = ("cell", np.isfinite(u[pos]).mean(axis=0).astype(np.float32) if pos.any()
                              else np.zeros(u.shape[1], np.float32))
     out.attrs.update(dict(qc_corr_min=corr_min, qc_pg_min=pg_min, qc_err_max=err_max,

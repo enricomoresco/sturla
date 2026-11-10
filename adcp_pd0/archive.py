@@ -27,6 +27,73 @@ FLAG_ATTRS = dict(flag_values=np.array([1, 2, 3, 4, 9], np.int8),
 TIME_ENC = dict(units="seconds since 1970-01-01 00:00:00", calendar="standard", dtype="float64")
 
 
+# --- flag con causa ---------------------------------------------------------------------
+# Ogni prodotto ha un flag principale (QARTOD: 1/3/4/9) e una variabile "causa" in cui ogni
+# bit indica un motivo diverso; il flag principale è il più grave fra le cause presenti.
+VEL_CAUSES = [  # (bit, nome, flag)
+    (1, "fuori_posizione", 4), (2, "movimento_telaio", 3), (4, "contaminazione_superficie", 4),
+    (8, "velocita_errore_alta", 4), (16, "inclinazione_eccessiva", 4), (32, "pochi_ping_validi", 4),
+    (64, "ping_validi_ridotti", 3), (128, "correlazione_bassa", 4), (256, "percent_good_basso", 4),
+    (512, "nessun_dato", 9), (1024, "valore_mancante", 9)]
+WAVE_CAUSES = [(1, "fuori_posizione", 4), (2, "movimento_telaio", 3), (4, "superficie_trovata_parzialmente", 3),
+               (8, "nessun_dato", 9)]
+DIR_CAUSES = [(1, "fuori_posizione", 4), (2, "movimento_telaio", 3), (4, "bassa_energia", 3),
+              (8, "nessun_dato", 9)]
+TEMP_CAUSES = [(1, "fuori_posizione", 4), (2, "pochi_campioni", 3), (4, "nessun_dato", 9)]
+POS_CAUSES = [(1, "fuori_posizione", 4), (2, "nessun_dato", 9)]
+CAUSE_DESCRIPTIONS = {
+    "fuori_posizione": "strumento non fermo sul fondo (in aria, discesa, recupero): dato da scartare",
+    "movimento_telaio": "il telaio stava ruotando/spostandosi (salto di heading o inclinazione): dato sospetto",
+    "contaminazione_superficie": "cella troppo vicina alla superficie (contaminazione side-lobe): dato rimosso",
+    "velocita_errore_alta": "velocita' d'errore oltre la soglia: dato rimosso",
+    "inclinazione_eccessiva": "inclinazione dello strumento oltre la soglia: dato rimosso",
+    "pochi_ping_validi": "meno del 50% di ping validi (correlazione bassa) nell'intervallo: dato rimosso",
+    "ping_validi_ridotti": "fra 50% e 80% di ping validi nell'intervallo: dato sospetto",
+    "correlazione_bassa": "correlazione sotto la soglia: dato rimosso",
+    "percent_good_basso": "percent good sotto la soglia: dato rimosso",
+    "nessun_dato": "nessuna misura nell'intervallo",
+    "valore_mancante": "valore non disponibile senza una causa specifica",
+    "superficie_trovata_parzialmente": "superficie trovata in meno del 90% dei ping del burst: dato sospetto",
+    "bassa_energia": "Hm0 sotto la soglia: direzione poco affidabile, dato sospetto",
+    "pochi_campioni": "meno di 30 s di misure nell'ora: dato sospetto",
+}
+
+
+def combine_flags(shape, conditions, causes):
+    """conditions: {nome: maschera}; restituisce (flag int8, causa uint16)."""
+    flag = np.ones(shape, np.int8)
+    cause = np.zeros(shape, np.uint16)
+    for bit, name, sev in causes:
+        m = conditions.get(name)
+        if m is None:
+            continue
+        m = np.broadcast_to(np.asarray(m, bool), shape)
+        cause |= np.where(m, bit, 0).astype(np.uint16)
+        flag = np.maximum(flag, np.where(m, sev, 1)).astype(np.int8)
+    return flag, cause
+
+
+def cause_attrs(causes, what):
+    return dict(long_name=f"causa del flag di {what} (somma di bit)",
+                flag_masks=np.array([c[0] for c in causes], np.uint16),
+                flag_meanings=" ".join(c[1] for c in causes),
+                comment="; ".join(f"{c[0]} = {c[1]} (flag {c[2]})" for c in causes))
+
+
+def cause_text(bits, causes):
+    bits = np.asarray(bits).astype(int)
+    return ["+".join(name for bit, name, _ in causes if b & bit) for b in bits]
+
+
+def flag_stats(flag, cause, causes) -> dict:
+    """Conteggi per valore di flag e per causa."""
+    f = np.asarray(flag).ravel()
+    c = np.asarray(cause).ravel().astype(int)
+    n = f.size
+    return dict(n=int(n), per_flag={int(v): int((f == v).sum()) for v in (1, 3, 4, 9)},
+                per_causa={name: int(((c & bit) > 0).sum()) for bit, name, _ in causes})
+
+
 def load_metadata(path: str | None) -> dict:
     md = {}
     if path:
@@ -90,18 +157,38 @@ def currents_archive(qc: xr.Dataset, md: dict, hab: float) -> xr.Dataset:
     t = qc.time.values
     z = qc.range.values.astype(np.float32) + np.float32(hab)
     dims = ("time", "z")
-    # flag per cella: 4 se un test QC fallisce, 9 se manca senza flag, 1 altrimenti
-    any_flag = np.zeros(qc.u.shape, bool)
-    for k in [k for k in qc.data_vars if k.startswith("flag_")]:
-        any_flag |= qc[k].values.astype(bool)
+    shape = qc.u.shape
+    F = lambda k: qc[k].values.astype(bool) if k in qc else None
+    n_p = qc.n_pings.values if "n_pings" in qc else None
+    empty = (n_p == 0) if n_p is not None else np.zeros(shape[0], bool)
+    pos_bad = F("flag_position")
+    if pos_bad is None and "in_position" in qc:
+        pos_bad = ~qc.in_position.values.astype(bool)[:, None]
+    gp = qc.good_ping_frac.values if "good_ping_frac" in qc else None
+    min_gp = float(qc.attrs.get("avg_min_good_frac", 0.5))
+    cond = {
+        "fuori_posizione": pos_bad,
+        "movimento_telaio": F("flag_motion")[:, None] if "flag_motion" in qc else None,
+        "contaminazione_superficie": F("flag_sidelobe"),
+        "velocita_errore_alta": F("flag_err"),
+        "inclinazione_eccessiva": F("flag_tilt"),
+        "pochi_ping_validi": (gp < min_gp) if gp is not None else None,
+        "ping_validi_ridotti": ((gp >= min_gp) & (gp < 0.8)) if gp is not None else None,
+        "correlazione_bassa": F("flag_corr"),
+        "percent_good_basso": F("flag_pg"),
+    }
+    flag, cause = combine_flags(shape, cond, VEL_CAUSES)
     valid = np.isfinite(qc.u.values)
-    flag = np.where(valid, 1, np.where(any_flag, 4, 9)).astype(np.int8)
-    if "good_ping_frac" in qc:
-        gp = qc.good_ping_frac.values
-        flag = np.where(valid & (gp < 0.8), 3, flag).astype(np.int8)
+    miss = ~valid & (flag == 1)
+    flag[miss] = 9
+    cause[miss] |= 1024
+    flag[empty] = 9
+    cause[empty] = 512
     V = lambda k: qc[k].values.astype(np.float32)
     ds = xr.Dataset(coords=dict(
-        time=("time", t, dict(standard_name="time", long_name="tempo (centro del burst)", axis="T")),
+        time=("time", t, dict(standard_name="time", axis="T", long_name=(
+            f"centro dell'intervallo di media di {qc.attrs['avg_bin_minutes']:g} min"
+            if qc.attrs.get("avg_bin_minutes") else "centro del burst"))),
         z=("z", z, dict(standard_name="height_above_sea_floor", long_name="quota della cella sul fondale",
                         units="m", positive="up", axis="Z"))))
     vel = dict(u=("eastward_sea_water_velocity", "velocita' verso Est"),
@@ -118,19 +205,18 @@ def currents_archive(qc: xr.Dataset, md: dict, hab: float) -> xr.Dataset:
                                                   units="degree", ancillary_variables="vel_qc"))
     if "echo_mean" in qc:
         ds["echo"] = (dims, V("echo_mean"), dict(long_name="intensita' eco media sui 4 beam", units="count"))
-    ds["vel_qc"] = (dims, flag, dict(long_name="flag di qualita' delle velocita'", **FLAG_ATTRS))
-    if "in_position" in qc:
-        dq = np.where(qc.in_position.values.astype(bool), 1, 4).astype(np.int8)
-    else:
-        dq = np.full(len(t), 2, np.int8)
-    if "n_pings" in qc:                       # intervalli senza misure: mancanti, non cattivi
-        empty = qc.n_pings.values == 0
-        dq[empty] = 9
-        flag[empty] = 9
+    ds["vel_qc"] = (dims, flag, dict(long_name="flag di qualita' delle velocita'",
+                                     ancillary_variables="vel_qc_cause", **FLAG_ATTRS))
+    ds["vel_qc_cause"] = (dims, cause, cause_attrs(VEL_CAUSES, "velocita'"))
+    inpos = qc.in_position.values.astype(bool) if "in_position" in qc else np.ones(len(t), bool)
+    dq, dc = combine_flags((len(t),), {"fuori_posizione": ~inpos & ~empty, "nessun_dato": empty}, POS_CAUSES)
     ds["deployment_qc"] = ("time", dq, dict(
-        long_name="flag strumento in posizione sul fondo",
-        comment="4 = fuori posizione (in aria, discesa, recupero): tutti i dati di quell'istante sono da scartare",
-        **FLAG_ATTRS))
+        long_name="flag strumento in posizione sul fondo (vale per temperatura, pressione, assetto)",
+        ancillary_variables="deployment_qc_cause", **FLAG_ATTRS))
+    ds["deployment_qc_cause"] = ("time", dc, cause_attrs(POS_CAUSES, "posizione"))
+    if "flag_motion" in qc:
+        ds["platform_motion"] = ("time", qc.flag_motion.values.astype(np.int8), dict(
+            long_name="1 = telaio in movimento nell'intervallo (rotazione/inclinazione)", units="1"))
     ts = dict(
         temperature=("sea_water_temperature", "temperatura dell'acqua al fondo (sensore dello strumento)", "degree_Celsius"),
         pressure=("sea_water_pressure", "pressione al sensore (media sul burst)", "dbar"),
@@ -193,15 +279,19 @@ def waves_archive(w: xr.Dataset, md: dict, hm0_dir_min: float = 0.25) -> xr.Data
         if src in w:
             ds[k] = ("time", w[src].values.astype(np.float32),
                      dict(standard_name=sn, long_name=f"{ln} ({method})", units=u, ancillary_variables="wave_qc"))
-    # flag
+    # flag con causa
     hm = ds["Hm0"].values if "Hm0" in ds else np.full(len(t), np.nan)
-    flag = np.where(np.isfinite(hm), 1, 9).astype(np.int8)
-    if has_vb and "surface_found_frac" in w:
-        flag = np.where(np.isfinite(hm) & (w.surface_found_frac.values < 0.9), 3, flag).astype(np.int8)
-    if "in_position" in w:
-        flag = np.where(w.in_position.values.astype(bool), flag, 4).astype(np.int8)
+    n = len(t)
+    inpos = w.in_position.values.astype(bool) if "in_position" in w else np.ones(n, bool)
+    mot = w.flag_motion.values.astype(bool) if "flag_motion" in w else np.zeros(n, bool)
+    sf = w.surface_found_frac.values if (has_vb and "surface_found_frac" in w) else np.ones(n)
+    nod = ~np.isfinite(hm) & inpos
+    flag, cause = combine_flags((n,), {"fuori_posizione": ~inpos, "movimento_telaio": mot & inpos,
+                                       "superficie_trovata_parzialmente": inpos & np.isfinite(hm) & (sf < 0.9),
+                                       "nessun_dato": nod}, WAVE_CAUSES)
     ds["wave_qc"] = ("time", flag, dict(long_name="flag di qualita' dei parametri d'onda",
-                                        comment="3 = superficie trovata in meno del 90% dei ping", **FLAG_ATTRS))
+                                        ancillary_variables="wave_qc_cause", **FLAG_ATTRS))
+    ds["wave_qc_cause"] = ("time", cause, cause_attrs(WAVE_CAUSES, "parametri d'onda"))
     if "Dp" in w:
         ds["Dp"] = ("time", w.Dp.values.astype(np.float32), dict(
             standard_name="sea_surface_wave_from_direction_at_variance_spectral_density_maximum",
@@ -211,11 +301,14 @@ def waves_archive(w: xr.Dataset, md: dict, hm0_dir_min: float = 0.25) -> xr.Data
             standard_name="sea_surface_wave_from_direction",
             long_name="direzione media di provenienza, da Nord orario", units="degree",
             ancillary_variables="direction_qc"))
-        dflag = np.where(np.isfinite(w.Dp.values), np.where(hm < hm0_dir_min, 3, 1), 9).astype(np.int8)
-        if "in_position" in w:
-            dflag = np.where(w.in_position.values.astype(bool), dflag, 4).astype(np.int8)
+        dok = np.isfinite(w.Dp.values)
+        dflag, dcause = combine_flags((n,), {"fuori_posizione": ~inpos, "movimento_telaio": mot & inpos,
+                                             "bassa_energia": inpos & dok & (np.nan_to_num(hm) < hm0_dir_min),
+                                             "nessun_dato": inpos & ~dok}, DIR_CAUSES)
         ds["direction_qc"] = ("time", dflag, dict(long_name="flag di qualita' delle direzioni",
-                                                   comment=f"3 = Hm0 < {hm0_dir_min} m (poca energia)", **FLAG_ATTRS))
+                                                   ancillary_variables="direction_qc_cause",
+                                                   comment=f"bassa_energia: Hm0 < {hm0_dir_min} m", **FLAG_ATTRS))
+        ds["direction_qc_cause"] = ("time", dcause, cause_attrs(DIR_CAUSES, "direzione"))
     if has_vb:
         ds["Hm0_pressure"] = ("time", w.Hm0.values.astype(np.float32), dict(
             long_name="Hm0 da pressione (solo frequenze sotto la frequenza di taglio)", units="m",
@@ -292,16 +385,21 @@ def hourly_temperature(reader, deployment: dict | None, p_min: float = 1.0,
     a_in = agg(df.temp[df.pos]) if df.pos.any() else None
     a_all = agg(df.temp)
     out = a_all.copy()
-    flag = np.where(a_all["count"] > 0, 4, 9)
+    has_data = a_all["count"].values > 0
+    has_in = np.zeros(len(out), bool)
+    few = np.zeros(len(out), bool)
     if a_in is not None:
         a_in = a_in.reindex(a_all.index)
-        has_in = a_in["count"].fillna(0) > 0
+        has_in = (a_in["count"].fillna(0) > 0).values
         out.loc[has_in] = a_in.loc[has_in]
-        flag = np.where(has_in, np.where(a_in["count"] >= min_samples, 1, 3), flag)
+        few = has_in & (a_in["count"].fillna(0).values < min_samples)
+    flag, cause = combine_flags((len(out),), {"fuori_posizione": has_data & ~has_in, "pochi_campioni": few,
+                                              "nessun_dato": ~has_data}, TEMP_CAUSES)
     # minuti effettivamente campionati nell'ora (le misure sono solo durante i burst)
     mins = df.temp.resample("1min").count().resample("1h").apply(lambda x: int((x > 0).sum()))
     out["sampled_minutes"] = mins.reindex(out.index).fillna(0).astype(int)
     out["qc"] = flag.astype(np.int8)
+    out["qc_cause"] = cause
     out = out.rename(columns={"mean": "temperature_mean", "std": "temperature_std", "min": "temperature_min",
                               "max": "temperature_max", "count": "n_samples"})
     out["n_samples"] = out["n_samples"].fillna(0).astype(int)
@@ -329,9 +427,10 @@ def temperature_archive(h: pd.DataFrame, md: dict, src_attrs: dict, deployment: 
         long_name="minuti dell'ora con misure", units="min",
         comment="lo strumento misura solo durante i burst: la media e' sui minuti campionati"))
     ds["temperature_qc"] = ("time", h.qc.values, dict(
-        long_name="flag di qualita' della temperatura oraria",
-        comment="1 = in posizione; 3 = meno di 30 s di dati; 4 = fuori posizione (in aria, discesa, "
-                "recupero); 9 = nessun dato", **FLAG_ATTRS))
+        long_name="flag di qualita' della temperatura oraria", ancillary_variables="temperature_qc_cause",
+        **FLAG_ATTRS))
+    ds["temperature_qc_cause"] = ("time", h.qc_cause.values.astype(np.uint16),
+                                  cause_attrs(TEMP_CAUSES, "temperatura"))
     ds = _station_coords(ds, md)
     src = xr.Dataset(attrs=dict(src_attrs))
     if deployment:
@@ -356,33 +455,46 @@ def write_archive(outdir: str, md: dict, hab: float, verbose: bool = True, p_min
     sid = (md.get("station_id") or "ADCP").replace(" ", "_")
     fmt = lambda t: pd.Timestamp(t).strftime("%Y%m%d")
     pc, pw = os.path.join(outdir, "currents_qc.nc"), os.path.join(outdir, "waves_bulk.nc")
+    c = wa = h = r = None
+    bases = []
     if os.path.exists(pc):
         qc = xr.load_dataset(pc)
         c = currents_archive(qc, md, hab)
         base = os.path.join(adir, f"{sid}_{fmt(c.time.values.min())}_{fmt(c.time.values.max())}")
+        bases.append(base)
         c.to_netcdf(base + "_currents.nc", encoding=_encoding(c))
         written.append(base + "_currents.nc")
-        cols = [k for k in ("deployment_qc", "temperature", "pressure", "water_depth", "heading", "pitch", "roll", "n_pings",
+        cols = [k for k in ("deployment_qc", "platform_motion", "temperature", "pressure", "water_depth",
+                            "heading", "pitch", "roll", "n_pings", "in_position_frac",
                             "u_davg", "v_davg", "speed_davg", "dir_davg") if k in c]
         df = c[cols].to_dataframe()[cols]
+        df.insert(1, "deployment_qc_cause", cause_text(c.deployment_qc_cause.values, POS_CAUSES))
         units = ", ".join(f"{k} [{c[k].attrs.get('units', '')}]" for k in cols)
         _write_csv(base + "_timeseries.csv", df, _csv_header(c, f"# colonne: {units}"))
         written.append(base + "_timeseries.csv")
-        for k in ("u", "v", "speed", "direction", "vel_qc"):
+        bits_doc = "# bit di causa: " + ", ".join(f"{b}={n}" for b, n, _ in VEL_CAUSES)
+        for k in ("u", "v", "speed", "direction", "vel_qc", "vel_qc_cause"):
             m = pd.DataFrame(c[k].values, index=pd.DatetimeIndex(c.time.values, name="time"),
                              columns=[f"z{z:.2f}m" for z in c.z.values])
-            _write_csv(base + f"_currents_{k}.csv", m,
-                       _csv_header(c, f"# {k} [{c[k].attrs.get('units', 'flag')}]; colonne = quota sul fondale"))
+            extra = f"# {k} [{c[k].attrs.get('units', 'flag')}]; colonne = quota sul fondale"
+            if k == "vel_qc_cause":
+                extra += "\n" + bits_doc + " (valore = somma dei bit)"
+            _write_csv(base + f"_currents_{k}.csv", m, _csv_header(c, extra))
             written.append(base + f"_currents_{k}.csv")
     if os.path.exists(pw):
         w = xr.load_dataset(pw)
         wa = waves_archive(w, md)
         base = os.path.join(adir, f"{sid}_{fmt(wa.time.values.min())}_{fmt(wa.time.values.max())}")
+        bases.append(base)
         wa.to_netcdf(base + "_waves.nc", encoding=_encoding(wa))
         written.append(base + "_waves.nc")
         cols = [k for k in ("Hm0", "Tp", "Tm01", "Tm02", "Dp", "Dm", "wave_qc", "direction_qc",
                             "water_depth", "Hm0_pressure", "n_samples") if k in wa]
         df = wa[cols].to_dataframe()[cols]
+        df.insert(df.columns.get_loc("wave_qc") + 1, "wave_qc_cause", cause_text(wa.wave_qc_cause.values, WAVE_CAUSES))
+        if "direction_qc" in df:
+            df.insert(df.columns.get_loc("direction_qc") + 1, "direction_qc_cause",
+                      cause_text(wa.direction_qc_cause.values, DIR_CAUSES))
         units = ", ".join(f"{k} [{wa[k].attrs.get('units', 'flag')}]" for k in cols)
         _write_csv(base + "_waves.csv", df, _csv_header(wa, f"# metodo: {wa.attrs['wave_method']}\n# colonne: {units}"))
         written.append(base + "_waves.csv")
@@ -407,7 +519,9 @@ def write_archive(outdir: str, md: dict, hab: float, verbose: bool = True, p_min
             written.append(base + "_temperature_hourly.nc")
             cols = ["temperature_mean", "temperature_std", "temperature_min", "temperature_max",
                     "n_samples", "sampled_minutes", "qc"]
-            _write_csv(base + "_temperature_hourly.csv", h[cols], _csv_header(
+            hc = h[cols].copy()
+            hc["qc_cause"] = cause_text(h.qc_cause.values, TEMP_CAUSES)
+            _write_csv(base + "_temperature_hourly.csv", hc, _csv_header(
                 ta, "# temperatura dell'acqua al fondo [degree_Celsius], media oraria; time_start = inizio "
                     "dell'ora; qc: 1 in posizione, 3 pochi dati, 4 fuori posizione, 9 nessun dato"))
             written.append(base + "_temperature_hourly.csv")
@@ -415,6 +529,11 @@ def write_archive(outdir: str, md: dict, hab: float, verbose: bool = True, p_min
                 _plot_temperature(h, os.path.join(outdir, "figures", "temperature_hourly.png"))
             except Exception as e:
                 print(f"  (grafico temperatura non prodotto: {e})")
+    if bases:
+        from .report import write_report
+        rep = write_report(outdir, md, hab, bases[0], c=c, wa=wa, h=h, written=list(written), reader=r)
+        written.append(rep)
+    if r is not None:
         r.close()
     if verbose:
         print("\nArchivio:")

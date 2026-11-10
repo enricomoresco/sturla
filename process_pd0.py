@@ -57,7 +57,8 @@ def run_currents(a):
             from adcp_pd0.diagnostics import check_transform
             print("  controllo trasformazione con la superficie del beam verticale (dη/dt):")
             check_transform(r, os.path.join(a.out, "figures"), orientation=a.orientation,
-                            corr_min=a.corr_min, deployment=dep)
+                            corr_min=a.corr_min, deployment=dep,
+                            summary_path=os.path.join(a.out, "check_transform.json"))
     dep = _deployment(a, r)
     qc = qc_currents(ds, corr_min=a.corr_min, pg_min=a.pg_min, err_max=a.err_max,
                      tilt_max=a.tilt_max, p_min=a.p_min, declination=a.declination,
@@ -97,6 +98,11 @@ def run_waves(a):
             if "time" in w[k].dims and k not in ("n", "duration_s", "depth", "depth_sensor", "p_std"):
                 w[k] = w[k].where(xr.DataArray(pos, dims="time"))
     w["in_position"] = ("time", pos.astype(np.uint8), dict(long_name="1 = strumento in posizione sul fondo"))
+    from adcp_pd0.deployment import motion_overlap
+    t0w = w.time.values
+    t1w = t0w + (np.nan_to_num(w.duration_s.values) * 1e6).astype("timedelta64[us]")
+    w["flag_motion"] = ("time", motion_overlap(t0w, t1w, dep).astype(np.uint8),
+                        dict(long_name="1 = telaio in movimento durante il burst"))
     w.attrs.update(deployment_start=dep["start"], deployment_end=dep["end"],
                    deployment_method=dep.get("method", ""))
     path = os.path.join(a.out, "waves_bulk.nc")
@@ -229,7 +235,8 @@ def main(argv=None):
         from adcp_pd0.diagnostics import check_transform
         r = StreamReader(a.out, pick_stream(a.out, "waves", a.waves_stream))
         check_transform(r, os.path.join(a.out, "figures"), n_bursts=a.n_bursts,
-                        orientation=a.orientation, corr_min=a.corr_min, deployment=_deployment(a, r))
+                        orientation=a.orientation, corr_min=a.corr_min, deployment=_deployment(a, r),
+                        summary_path=os.path.join(a.out, "check_transform.json"))
     elif a.cmd == "all":
         if a.skip_convert:
             from adcp_pd0.convert import load_inventory, print_inventory

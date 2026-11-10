@@ -170,6 +170,21 @@ python process_pd0.py archive -o out --hab 0.5 --metadata metadata.json
 | `<ID>_..._currents_{u,v,speed,direction,vel_qc}.csv` | matrici tempo × quota |
 | `<ID>_..._temperature_hourly.nc` / `.csv` | **temperatura al fondo, media oraria** da tutti i ping (media, dev. std, min, max, n. ping, minuti campionati, flag `temperature_qc`) |
 
+Ogni esecuzione di `archive` scrive anche **`<ID>_..._RAPPORTO_ELABORAZIONE.md`**: descrive con i
+valori reali del dataset tutto ciò che è stato fatto ai dati (file di partenza, configurazione,
+periodo in posizione e movimenti del telaio, trasformazioni, medie, soglie di QC, risultati
+del controllo della trasformazione, statistiche dei flag per causa, file prodotti, limiti).
+
+**Flag e cause.** Ogni flag (QARTOD 1/3/4/9) ha accanto una variabile `*_cause` (NetCDF) o
+una colonna `*_cause` (CSV) con il motivo: `fuori_posizione`, `movimento_telaio`,
+`contaminazione_superficie`, `velocita_errore_alta`, `inclinazione_eccessiva`,
+`pochi_ping_validi`, `ping_validi_ridotti`, `superficie_trovata_parzialmente`,
+`bassa_energia`, `pochi_campioni`, `nessun_dato`, ... (nei NetCDF come bit, con
+`flag_masks`/`flag_meanings`). **Movimento del telaio**: salti di heading > 1° o di
+pitch/roll > 0.3° fra minuti consecutivi con dati, elencati in `deployment.json` ed
+evidenziati in arancione in `figures/deployment.png`; i dati che vi si sovrappongono hanno
+flag 3.
+
 I NetCDF seguono CF-1.8 / ACDD-1.3 (standard_name, unità, `height_above_sea_floor`,
 metadati globali, parametri di elaborazione con prefisso `proc_`). Flag secondo IOOS/QARTOD:
 1 buono, 2 non valutato, 3 sospetto, 4 cattivo, 9 mancante. La **temperatura** è quella del

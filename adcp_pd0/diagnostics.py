@@ -163,7 +163,7 @@ def plot_burst_check(res, t, path, title=""):
 
 
 def check_transform(reader, out_dir=None, n_bursts=10, min_pings=256, orientation=None,
-                    corr_min=64, deployment=None, verbose=True):
+                    corr_min=64, deployment=None, summary_path=None, verbose=True):
     """Esegue ``burst_check`` sui burst lunghi più energetici e (opzionale) salva il grafico."""
     import os
     from .waves import find_bursts
@@ -232,6 +232,24 @@ def check_transform(reader, out_dir=None, n_bursts=10, min_pings=256, orientatio
         if nn:
             print(f"  ({nn} burst senza coerenza: piu' del 30% dei ping non validi nella cella usata, "
                   "correlazione < soglia --corr-min)")
+    if summary_path and rows:
+        import json
+
+        def cm(a):
+            a = np.deg2rad([x for x in a if np.isfinite(x)])
+            return float(np.degrees(np.angle(np.mean(np.exp(1j * a))))) if len(a) else None
+        med = lambda k: float(np.nanmedian([r.get(k, np.nan) for r in rows]))
+        lags = [r["ph_w4"] / (360.0 * r["fp"]) for r in rows
+                if np.isfinite(r.get("ph_w4", np.nan)) and r.get("coh_w4", 0) > 0.3]
+        summ = dict(n_bursts=len(rows), bursts=[str(r["time"])[:16] for r in rows],
+                    hm0_range=[float(min(r["Hs_est"] for r in rows)), float(max(r["Hs_est"] for r in rows))],
+                    cell_range_m=float(rows[0]["range"]),
+                    coh2_w4_deta=med("coh_w4"), phase_w4_deta_deg=cm([r.get("ph_w4", np.nan) for r in rows]),
+                    coh2_wvb_deta=med("coh_vb"), phase_wvb_deta_deg=cm([r.get("ph_vb", np.nan) for r in rows]),
+                    coh2_uv_eta=med("coh_uh"), lag_w4_s=float(np.median(lags)) if lags else None,
+                    corr_w4_deta=med("c_w4_deta"), corr_wvb_deta=med("c_vb_deta"))
+        with open(summary_path, "w", encoding="utf-8") as fh:
+            json.dump(summ, fh, indent=2)
     if out_dir and best is not None:
         os.makedirs(out_dir, exist_ok=True)
         plot_burst_check(best, best["time"], os.path.join(out_dir, "check_transform.png"))

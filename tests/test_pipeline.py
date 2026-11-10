@@ -260,3 +260,49 @@ def test_cli_checks_and_skip_convert(sentinel, tmp_path):
     process_pd0.main(["convert", sentinel["file"], "-o", str(out)])
     process_pd0.main(["all", "--skip-convert", "-o", str(out)])
     assert any(f.endswith("_waves.nc") for f in os.listdir(out / "archive"))
+
+
+def test_motion_and_causes(tmp_path):
+    """Telaio che ruota a meta' periodo: evento rilevato, flag 3 con causa 'movimento_telaio'."""
+    import json
+    import xarray as xr
+    from datetime import datetime, timedelta
+    from synthetic import make_sentinel_like
+    parts = []
+    f0 = tmp_path / "p.pd0"
+    for h in range(10):
+        hd, pt = (30.0, 2.0) if h < 5 else (38.0, 1.0)        # rotazione fra le 04:20 e le 05:00
+        for start, n in ((0, 1024), (20, 180)):
+            if start == 0 and h % 2:
+                continue
+            make_sentinel_like(str(f0), bursts=1, nping=n, depth=20.0, heading=hd, pitch=pt,
+                               t0=datetime(2026, 7, 10, h, start), seed=10 * h + start)
+            parts.append(f0.read_bytes())
+    f = tmp_path / "mot.pd0"
+    f.write_bytes(b"".join(parts))
+    out = tmp_path / "o"
+    process_pd0.main(["all", str(f), "-o", str(out), "--puv-cell", "auto"])
+    dep = json.load(open(out / "deployment.json"))
+    assert len(dep["motion_events"]) == 1
+    ev = dep["motion_events"][0]
+    assert abs(ev["heading_before"] - 30) < 1 and abs(ev["heading_after"] - 38) < 1
+    arch = out / "archive"
+    c = xr.open_dataset(next(arch.glob("*_currents.nc")))
+    mot = c.platform_motion.values.astype(bool)
+    assert mot.sum() in (1, 2)
+    q, cz = c.vel_qc.values, c.vel_qc_cause.values
+    ok_cells = np.isfinite(c.u.values)
+    assert (q[mot][ok_cells[mot]] == 3).all() and ((cz[mot] & 2) > 0).all()
+    assert (q[~mot][ok_cells[~mot]] == 1).all()
+    assert ((cz & 4) > 0).any()                              # cause diverse distinte (superficie)
+    assert "flag_meanings" in c.vel_qc_cause.attrs
+    w = xr.open_dataset(next(arch.glob("*_waves.nc")))
+    assert ((w.wave_qc.values == 3) == ((w.wave_qc_cause.values & 2) > 0)).all()
+    import pandas as pd
+    df = pd.read_csv(next(arch.glob("*_timeseries.csv")), comment="#")
+    assert "deployment_qc_cause" in df and "platform_motion" in df
+    rep = next(arch.glob("*_RAPPORTO_ELABORAZIONE.md")).read_text(encoding="utf-8")
+    for txt in ("Periodo in posizione", "movimento_telaio", "Controllo della trasformazione",
+                "## 6. Flag di qualita'", "fuori_posizione", "_temperature_hourly.nc"):
+        assert txt in rep, txt
+    assert "| 2026-07-10 0" in rep                       # riga della tabella dei movimenti
