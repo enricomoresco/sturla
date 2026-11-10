@@ -70,7 +70,7 @@ def run_waves(a):
     print(f"\nOnde: stream {name}")
     r = StreamReader(a.out, name)
     w = analyze_waves(r, hab=a.hab, p_atm=a.p_atm, nperseg=a.nperseg, fmin=a.fmin, fmax=a.fmax,
-                      kp2_min=a.kp2_min, use_vb=not a.no_vb, puv_cell=a.puv_cell,
+                      kp2_min=a.kp2_min, use_vb=not a.no_vb, p_min=a.p_min, puv_cell=a.puv_cell,
                       orientation=a.orientation, declination=a.declination, dir_ref=a.dir_ref)
     if a.start or a.end:
         w = w.sel(time=slice(a.start, a.end))
@@ -104,7 +104,10 @@ def main(argv=None):
 
     pi = sub.add_parser("inspect", help="ispezione veloce dei file (nessun output scritto)")
     pi.add_argument("inputs", nargs="+")
-    pi.add_argument("--max-mb", type=float, default=None, help="analizza solo i primi N MB di ogni file")
+    pi.add_argument("--max-mb", type=float, default=None, help="analizza solo N MB (dall'inizio della porzione)")
+    RANGE_HELP = ("porzione di ogni file da usare, INIZIO:FINE in %% o in MB, es. 25%%:75%% "
+                  "(meta' centrale), 50:3650 (MB), 5%%: (salta il primo 5%%)")
+    pi.add_argument("--range", dest="byte_range", default=None, help=RANGE_HELP)
 
     def common(sp):
         sp.add_argument("-o", "--out", required=True, help="cartella di output")
@@ -141,17 +144,19 @@ def main(argv=None):
     pc = sub.add_parser("convert", help="PD0 -> NetCDF")
     pc.add_argument("inputs", nargs="+")
     pc.add_argument("-o", "--out", required=True)
+    pc.add_argument("--range", dest="byte_range", default=None, help=RANGE_HELP)
     for n in ("currents", "waves", "plots"):
         common(sub.add_parser(n))
     pa = sub.add_parser("all", help="convert + currents + waves + plots")
     pa.add_argument("inputs", nargs="+")
+    pa.add_argument("--range", dest="byte_range", default=None, help=RANGE_HELP)
     common(pa)
 
     a = p.parse_args(argv)
     if a.cmd == "inspect":
-        inspect_files(a.inputs, a.max_mb)
+        inspect_files(a.inputs, a.max_mb, a.byte_range)
     elif a.cmd == "convert":
-        convert_files(a.inputs, a.out)
+        convert_files(a.inputs, a.out, byte_range=a.byte_range)
     elif a.cmd == "currents":
         run_currents(a)
     elif a.cmd == "waves":
@@ -159,7 +164,7 @@ def main(argv=None):
     elif a.cmd == "plots":
         run_plots(a)
     elif a.cmd == "all":
-        convert_files(a.inputs, a.out)
+        convert_files(a.inputs, a.out, byte_range=a.byte_range)
         qc = run_currents(a)
         w = run_waves(a)
         run_plots(a, qc, w)

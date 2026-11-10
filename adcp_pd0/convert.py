@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from .pd0 import index_file, iter_decode, to_dataset, encoding_for
+from .pd0 import index_file, iter_decode, to_dataset, encoding_for, parse_byte_range
 
 PD0_EXT = (".pd0", ".000", ".001", ".002", ".003", ".004", ".005")
 
@@ -42,8 +42,11 @@ def _concat_dicts(parts: list) -> dict:
     return out
 
 
-def convert_files(files, outdir: str, chunk_bytes: float = 150e6, verbose: bool = True) -> dict:
-    """Converte i file PD0 in ``outdir/raw/<stream>/*.nc`` e scrive ``outdir/inventory.json``."""
+def convert_files(files, outdir: str, chunk_bytes: float = 150e6, verbose: bool = True,
+                  byte_range: str | None = None) -> dict:
+    """Converte i file PD0 in ``outdir/raw/<stream>/*.nc`` e scrive ``outdir/inventory.json``.
+
+    ``byte_range`` (es. "25%:75%" o "100:3600" in MB) limita ogni file a una porzione."""
     files = expand_inputs(files)
     if not files:
         raise FileNotFoundError("nessun file PD0 trovato")
@@ -53,7 +56,10 @@ def convert_files(files, outdir: str, chunk_bytes: float = 150e6, verbose: bool 
         t0 = _time.time()
         if verbose:
             print(f"[{os.path.basename(f)}] {os.path.getsize(f) / 2**20:,.1f} MB: indicizzazione...", flush=True)
-        idx = index_file(f, verbose=verbose)
+        b0, b1 = parse_byte_range(byte_range, os.path.getsize(f))
+        if verbose and byte_range:
+            print(f"  porzione {byte_range}: da {b0 / 2**20:,.1f} a {b1 / 2**20:,.1f} MB", flush=True)
+        idx = index_file(f, verbose=verbose, start_byte=b0, end_byte=b1)
         stem = os.path.splitext(os.path.basename(f))[0]
         counter = {}
         written = []
@@ -211,16 +217,22 @@ def burst_summary(t: np.ndarray) -> dict:
                 interval_max_min=float(np.max(rep)), lengths=n)
 
 
-def inspect_files(files, max_mb: float | None = None) -> None:
+def inspect_files(files, max_mb: float | None = None, byte_range: str | None = None) -> None:
     """Ispezione veloce: layout, data type, stream, periodo e campionamento (solo leader)."""
     from .pd0 import describe_config, _decode_fixed, _v
     from .transform import theoretical_matrix
     for f in expand_inputs(files):
         print(f"\n=== {f} ({os.path.getsize(f) / 2**20:,.1f} MB)")
-        idx = index_file(f, max_bytes=None if max_mb is None else max_mb * 2**20, verbose=False)
+        b0, b1 = parse_byte_range(byte_range, os.path.getsize(f))
+        idx = index_file(f, max_bytes=None if max_mb is None else b0 + max_mb * 2**20, verbose=False,
+                         start_byte=b0, end_byte=b1)
         st = idx.stats
         if st.get("partial"):
-            print(f"(analizzati solo i primi {st['bytes_scanned'] / 2**20:,.0f} MB)")
+            print(f"(analizzata solo la porzione {st['start_byte'] / 2**20:,.1f} - "
+                  f"{st['end_byte'] / 2**20:,.1f} MB)")
+        if idx.n_resync:
+            print(f"  ATTENZIONE: {idx.n_resync} risincronizzazioni, "
+                  f"{st['bytes_skipped']:,} byte non riconosciuti come ensemble validi")
         print(f"ensemble: {st['n_ensembles']:,}  risincronizzazioni: {idx.n_resync}  "
               f"byte non attribuiti: {st['bytes_skipped']:,}")
         for i, l in enumerate(idx.layouts):

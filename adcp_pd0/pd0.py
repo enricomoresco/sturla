@@ -106,24 +106,55 @@ def _checksum_ok(mm, pos: int, nb: int) -> bool:
     return s == (mm[pos + nb] | (mm[pos + nb + 1] << 8))
 
 
-def index_file(path: str, max_bytes: int | None = None, verbose: bool = True) -> FileIndex:
+def parse_byte_range(spec: str | None, size: int) -> tuple:
+    """'25%:75%' -> metà centrale; '100:3600' -> da 100 MB a 3600 MB; ':200' -> primi 200 MB;
+    '-50:' non ammesso. Restituisce (start_byte, end_byte)."""
+    if not spec:
+        return 0, size
+
+    def conv(x, default):
+        x = x.strip()
+        if not x:
+            return default
+        if x.endswith("%"):
+            return int(size * float(x[:-1]) / 100.0)
+        return int(float(x) * 2**20)
+
+    if ":" not in spec:
+        raise ValueError("formato atteso INIZIO:FINE, es. 25%:75% oppure 100:3600 (MB)")
+    a, b = spec.split(":", 1)
+    start, end = max(0, conv(a, 0)), min(size, conv(b, size))
+    if end <= start:
+        raise ValueError(f"intervallo vuoto: {spec}")
+    return start, end
+
+
+def index_file(path: str, max_bytes: int | None = None, verbose: bool = True,
+               start_byte: int = 0, end_byte: int | None = None) -> FileIndex:
     """Indicizza un file PD0 senza leggerlo in memoria.
 
-    ``max_bytes`` limita la scansione ai primi N byte (utile per un'ispezione veloce).
+    ``start_byte``/``end_byte`` limitano la scansione a una porzione del file (es. per
+    escludere la parte iniziale e finale); ``max_bytes`` equivale a end_byte.
+    Si parte dal primo header valido dopo ``start_byte``; l'ultimo ensemble che inizia
+    prima di ``end_byte`` viene letto per intero.
     """
     size = os.path.getsize(path)
     with open(path, "rb") as f:
         mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
     end = size if max_bytes is None else min(size, int(max_bytes))
+    if end_byte is not None:
+        end = min(end, int(end_byte))
+    start_byte = max(0, int(start_byte))
     positions = array("q")
     lay_ids = array("i")
     layout_keys: dict = {}
     n_resync = 0
     report_every = 256 * 2**20
-    next_report = report_every
+    span_ = end - start_byte
+    next_report = start_byte + report_every
 
     find = mm.find
-    pos = find(HEADER, 0, end)
+    pos = find(HEADER, start_byte, end)
     while 0 <= pos <= end - 6:
         nb = mm[pos + 2] | (mm[pos + 3] << 8)
         ndt = mm[pos + 4 + 1]
@@ -154,7 +185,7 @@ def index_file(path: str, max_bytes: int | None = None, verbose: bool = True) ->
             n_resync += 1
             pos = find(HEADER, pos + 1, end)
         if verbose and pos > next_report:
-            print(f"  indicizzati {pos / 2**20:,.0f} / {end / 2**20:,.0f} MB", flush=True)
+            print(f"  indicizzati {(pos - start_byte) / 2**20:,.0f} / {span_ / 2**20:,.0f} MB", flush=True)
             next_report += report_every
 
     layouts = []
@@ -174,11 +205,13 @@ def index_file(path: str, max_bytes: int | None = None, verbose: bool = True) ->
         if len(lay.ids) != len(lay.offsets):
             lay.ids = lay.ids + (0xFFFF,) * (len(lay.offsets) - len(lay.ids))
     covered = int(sum((l.nbytes + 2) * l.count for l in layouts))
+    span = end - start_byte
     idx = FileIndex(path=path, size=size, positions=positions, layout_id=lay_ids,
                     layouts=layouts, n_resync=n_resync,
-                    stats=dict(bytes_scanned=end, bytes_in_ensembles=covered,
-                               bytes_skipped=max(0, end - covered), n_ensembles=len(positions),
-                               partial=end < size))
+                    stats=dict(bytes_scanned=span, start_byte=start_byte, end_byte=end,
+                               bytes_in_ensembles=covered,
+                               bytes_skipped=max(0, span - covered), n_ensembles=len(positions),
+                               partial=(end < size) or (start_byte > 0)))
     idx._mm = mm  # tenuto aperto per la decodifica
     return idx
 

@@ -130,3 +130,31 @@ def test_sentinel_like_cli(sentinel, tmp_path):
     process_pd0.main(["all", sentinel["file"], "-o", str(out), "--puv-cell", "20"])
     assert (out / "currents_qc.nc").exists() and (out / "currents_avg.nc").exists()
     assert (out / "figures" / "currents_sections.png").exists()
+
+
+def test_trash_and_range(tmp_path):
+    from synthetic import make_trashy
+    from adcp_pd0.pd0 import parse_byte_range
+    f = tmp_path / "trash.pd0"
+    tr = make_trashy(str(f), bursts=6, depth=20.0)
+    size = os.path.getsize(f)
+    assert parse_byte_range("25%:75%", size) == (size // 4, int(size * 0.75))
+    assert parse_byte_range(":1", size) == (0, 2**20)
+    # 1) file intero: la spazzatura viene saltata, i burst fuori acqua scartati
+    out = tmp_path / "all"
+    process_pd0.main(["all", str(f), "-o", str(out), "--puv-cell", "auto"])
+    import xarray as xr
+    w = xr.load_dataset(out / "waves_bulk.nc")
+    good = np.isfinite(w.Hm0_vb.values)
+    assert good.sum() == tr["bursts"]
+    assert np.allclose(w.Hm0_vb.values[good], tr["Hs"], rtol=0.12)
+    qc = xr.load_dataset(out / "currents_qc.nc")
+    assert qc.sizes["time"] == tr["bursts"]                 # profili fuori acqua eliminati
+    # 2) solo la metà centrale
+    out2 = tmp_path / "mid"
+    process_pd0.main(["all", str(f), "-o", str(out2), "--range", "25%:75%", "--puv-cell", "auto"])
+    w2 = xr.load_dataset(out2 / "waves_bulk.nc")
+    ok2 = np.isfinite(w2.Hm0_vb.values)
+    assert 1 <= ok2.sum() <= tr["bursts"]
+    assert np.allclose(w2.Hm0_vb.values[ok2], tr["Hs"], rtol=0.12)
+    assert np.allclose(w2.Dp.values[ok2], tr["dir_from"], atol=5)

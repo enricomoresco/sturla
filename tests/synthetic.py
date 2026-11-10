@@ -215,3 +215,25 @@ def make_sentinel_like(path, bursts=8, interval_min=30, nping=1024, fs=2.0, dept
                 n += 1
     return dict(Hs=Hs, Tp=Tp, dir_from=dir_from, U=U, V=V, depth=depth, hab=hab, bursts=bursts,
                 prof=prof, side=side, n=n)
+
+
+def make_trashy(path, **kw):
+    """File reale-simile con spazzatura in testa e in coda: byte casuali + ensemble validi
+    ma registrati fuori acqua (pressione ~0, tempi prima/dopo il deployment)."""
+    import os
+    import tempfile
+    rng_ = np.random.default_rng(1)
+    with tempfile.TemporaryDirectory() as d:
+        good = os.path.join(d, "good.pd0")
+        truth = make_sentinel_like(good, **kw)
+        dry = os.path.join(d, "dry.pd0")
+        # stesso strumento ma in aria: pressione ~0, 2 burst
+        make_sentinel_like(dry, bursts=2, depth=0.6, hab=0.5, Hs=0.0, seed=5)
+        body, dry_b = open(good, "rb").read(), open(dry, "rb").read()
+    trash = lambda n: rng_.integers(0, 256, n, dtype=np.uint8).tobytes()
+    head = trash(300_000) + dry_b + trash(50_000)
+    tail = trash(70_000) + dry_b + trash(300_000)
+    with open(path, "wb") as f:
+        f.write(head + body + tail)
+    truth.update(head_bytes=len(head), tail_bytes=len(tail), body_bytes=len(body))
+    return truth

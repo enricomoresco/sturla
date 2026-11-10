@@ -45,6 +45,22 @@ Parametri principali (`python process_pd0.py all -h` per l'elenco completo):
 | `--currents-stream`, `--waves-stream` | forza la scelta degli stream (nomi da `inspect`) | automatico |
 | `--orientation up/down` | forza l'orientamento | dal fixed leader |
 
+## Elaborare solo una porzione del file
+
+L'inizio e la fine del file (strumento in aria, messa in acqua, recupero) contengono dati
+non utilizzabili. Per una prova preliminare conviene usare solo la parte centrale:
+
+```bash
+python process_pd0.py inspect sturla_20260707T125042.pd0 --range 45%:55%
+python process_pd0.py all sturla_20260707T125042.pd0 -o out_prova --range 45%:55% --puv-cell auto --hab 0.5
+```
+
+`--range INIZIO:FINE` accetta percentuali (`25%:75%`) o MB (`300:3400`); un estremo vuoto
+indica inizio/fine file (`5%:`). La lettura parte dal primo ensemble valido dopo INIZIO.
+Sull'elaborazione completa, oltre a `--start/--end` (taglio per data), ensemble e burst con
+pressione media < `--p-min` (default 1 dbar) sono comunque scartati come fuori acqua, e i
+byte non validi vengono saltati.
+
 ## Caso tipico Sentinel V in modalità onde (un solo stream di ping a 2 Hz)
 
 Se `inspect` mostra **un solo stream** con `pings_per_ens 1`, dt 0.5 s e burst, e

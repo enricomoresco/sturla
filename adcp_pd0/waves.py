@@ -109,13 +109,14 @@ def _moments(f, S, band):
 
 def analyze_waves(reader, hab: float = 0.5, p_atm: float = 0.0, nperseg: int = 256,
                   fmin: float = 0.04, fmax: float = 0.6, kp2_min: float = 0.05,
-                  min_samples: int = 256, use_vb: bool = True, puv_cell: int | None = None,
+                  min_samples: int = 256, use_vb: bool = True, p_min: float = 1.0, puv_cell: int | None = None,
                   orientation: str | None = None, declination: float = 0.0, dir_ref: str = "auto",
                   max_samples_per_load: int = 2_000_000, verbose: bool = True) -> xr.Dataset:
     """Statistiche d'onda per burst dallo stream onde.
 
     hab        : altezza del sensore di pressione/trasduttore sul fondo [m]
     p_atm      : offset da sottrarre alla pressione [dbar] (0 se il sensore è già azzerato in aria)
+    p_min      : burst con pressione media < p_min [dbar] considerati fuori acqua e scartati
     kp2_min    : frequenza di taglio dove la funzione di trasferimento Kp^2 scende sotto questa soglia
     puv_cell   : indice (0-based) della cella da usare per la direzione (None = no)
     dir_ref    : riferimento per la direzione: "auto" (superficie dal beam verticale se c'è,
@@ -175,8 +176,9 @@ def analyze_waves(reader, hab: float = 0.5, p_atm: float = 0.0, nperseg: int = 2
             depth_s = float(np.nanmean(p)) * 1e4 / (RHO * G)   # profondità sensore [m]
             h = depth_s + hab
             row.update(depth=h, depth_sensor=depth_s, p_std=float(np.nanstd(p)))
+            out_of_water = float(np.nanmean(p)) < p_min
             p = _interp_gaps(p)
-            if p is None or h <= 0.5:
+            if p is None or h <= 0.5 or out_of_water:
                 rows.append(row); S_p.append(nanS); S_v.append(nanS)
                 continue
             eta_p = (p - p.mean()) * 1e4 / (RHO * G)   # in metri d'acqua
