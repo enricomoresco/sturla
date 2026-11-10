@@ -220,6 +220,15 @@ def check_transform(reader, out_dir=None, n_bursts=10, min_pings=256, orientatio
                  if cv > 0.3 else "poco coerente"))
         print(f"                      coh²(velocita' orizzontali, η) = {ch:.2f} "
               "(alta = le velocita' orizzontali vedono le onde: base della direzione PUV)")
+        lags = [r["ph_w4"] / (360.0 * r["fp"]) for r in rows
+                if np.isfinite(r.get("ph_w4", np.nan)) and r.get("coh_w4", 0) > 0.3]
+        if lags:
+            print(f"  sfasamento temporale stimato w(4 beam) rispetto alla superficie: {np.median(lags):+.2f} s "
+                  "(positivo = i 4 beam in ritardo; ~1 ping = 0.5 s indica pings non simultanei)")
+        nn = sum(not np.isfinite(r.get("coh_w4", np.nan)) for r in rows)
+        if nn:
+            print(f"  ({nn} burst senza coerenza: piu' del 30% dei ping non validi nella cella usata, "
+                  "correlazione < soglia --corr-min)")
     if out_dir and best is not None:
         os.makedirs(out_dir, exist_ok=True)
         plot_burst_check(best, best["time"], os.path.join(out_dir, "check_transform.png"))
