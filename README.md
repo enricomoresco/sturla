@@ -164,11 +164,16 @@ python process_pd0.py archive -o out --hab 0.5 --metadata metadata.json
 | `<ID>_..._timeseries.csv` | temperatura, pressione, profondità, assetto, corrente media sulla verticale |
 | `<ID>_..._waves.csv` | parametri d'onda e flag |
 | `<ID>_..._currents_{u,v,speed,direction,vel_qc}.csv` | matrici tempo × quota |
+| `<ID>_..._temperature_hourly.nc` / `.csv` | **temperatura al fondo, media oraria** da tutti i ping (media, dev. std, min, max, n. ping, minuti campionati, flag `temperature_qc`) |
 
 I NetCDF seguono CF-1.8 / ACDD-1.3 (standard_name, unità, `height_above_sea_floor`,
 metadati globali, parametri di elaborazione con prefisso `proc_`). Flag secondo IOOS/QARTOD:
 1 buono, 2 non valutato, 3 sospetto, 4 cattivo, 9 mancante. La **temperatura** è quella del
-sensore nella testa dello strumento (acqua al fondo); la salinità non è misurata.
+sensore nella testa dello strumento (acqua al fondo); la salinità non è misurata. Nella
+media oraria si usano solo i ping in posizione (flag 1; 3 se meno di 30 s di dati); le ore
+interamente fuori posizione hanno flag 4. Lo strumento misura solo durante i burst, quindi
+la media oraria è sui minuti campionati (`sampled_minutes`). Grafico:
+`figures/temperature_hourly.png`.
 
 ## Uso da Python / Jupyter
 

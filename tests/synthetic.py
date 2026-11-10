@@ -207,7 +207,8 @@ def make_sentinel_like(path, bursts=8, interval_min=30, nping=1024, fs=2.0, dept
                     p_dbar = p_dbar * i / npb
                     p_, r_ = 20 * np.sin(i / 7.0), 15 * np.cos(i / 5.0)
                 fl = _fixed(nc, 4, 1, cs, b1, ex=0) + b"\x00"         # 60 B
-                vl = _variable(n, tb + timedelta(seconds=tt), p_dbar, h_, p_, r_) + b"\x00"  # 66 B
+                temp = 25.0 if mode == "dry" else 15.0 + 0.5 * np.sin(2 * np.pi * (b * interval_min + tt / 60) / 720)
+                vl = _variable(n, tb + timedelta(seconds=tt), p_dbar, h_, p_, r_, temp=temp) + b"\x00"  # 66 B
                 echo_vb = (60 + 120 * np.exp(-0.5 * ((r_vb - (xd + eta)) / 0.4) ** 2)).astype(int)
                 if mode == "dry":
                     echo_vb = rng_.integers(40, 70, nvb)

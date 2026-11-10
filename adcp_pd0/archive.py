@@ -262,7 +262,81 @@ def _write_csv(path, df, header):
         df.to_csv(fh, index=True, date_format="%Y-%m-%dT%H:%M:%S", float_format="%.4f")
 
 
-def write_archive(outdir: str, md: dict, hab: float, verbose: bool = True) -> list:
+def hourly_temperature(reader, deployment: dict | None, p_min: float = 1.0,
+                       min_samples: int = 60) -> pd.DataFrame:
+    """Statistiche orarie della temperatura da tutti i ping.
+
+    Ore con strumento in posizione: statistiche dei soli ping in posizione, flag 1 (3 se
+    meno di ``min_samples`` ping, cioè < 30 s di dati a 2 Hz). Ore interamente fuori
+    posizione: statistiche di tutti i ping, flag 4. Ore senza dati: flag 9.
+    """
+    from .deployment import in_position
+    ds = reader.load(["temperature", "pressure"])
+    t = ds.time.values
+    df = pd.DataFrame(dict(temp=ds.temperature.values.astype(float)), index=pd.DatetimeIndex(t))
+    pos = np.ones(len(t), bool)
+    if deployment is not None:
+        pos &= in_position(t, deployment)
+    if "pressure" in ds:
+        pos &= ds.pressure.values >= p_min
+    df["pos"] = pos
+    agg = lambda x: x.resample("1h").agg(["mean", "std", "min", "max", "count"])
+    a_in = agg(df.temp[df.pos]) if df.pos.any() else None
+    a_all = agg(df.temp)
+    out = a_all.copy()
+    flag = np.where(a_all["count"] > 0, 4, 9)
+    if a_in is not None:
+        a_in = a_in.reindex(a_all.index)
+        has_in = a_in["count"].fillna(0) > 0
+        out.loc[has_in] = a_in.loc[has_in]
+        flag = np.where(has_in, np.where(a_in["count"] >= min_samples, 1, 3), flag)
+    # minuti effettivamente campionati nell'ora (le misure sono solo durante i burst)
+    mins = df.temp.resample("1min").count().resample("1h").apply(lambda x: int((x > 0).sum()))
+    out["sampled_minutes"] = mins.reindex(out.index).fillna(0).astype(int)
+    out["qc"] = flag.astype(np.int8)
+    out = out.rename(columns={"mean": "temperature_mean", "std": "temperature_std", "min": "temperature_min",
+                              "max": "temperature_max", "count": "n_samples"})
+    out["n_samples"] = out["n_samples"].fillna(0).astype(int)
+    out.index.name = "time_start"
+    return out
+
+
+def temperature_archive(h: pd.DataFrame, md: dict, src_attrs: dict, deployment: dict | None) -> xr.Dataset:
+    t0 = h.index.values
+    t1 = (h.index + pd.Timedelta(hours=1)).values
+    ds = xr.Dataset(coords=dict(time=("time", t0 + (t1 - t0) / 2, dict(
+        standard_name="time", long_name="centro dell'ora", axis="T", bounds="time_bnds"))))
+    ds["time_bnds"] = (("time", "nv"), np.stack([t0, t1], axis=1))
+    cm = "time: {} (interval: 1 hour)"
+    ds["temperature"] = ("time", h.temperature_mean.values.astype(np.float32), dict(
+        standard_name="sea_water_temperature", long_name="temperatura media oraria al fondo",
+        units="degree_Celsius", cell_methods=cm.format("mean"), ancillary_variables="temperature_qc"))
+    for k, ln, m in (("temperature_std", "deviazione standard nell'ora", "standard_deviation"),
+                     ("temperature_min", "minimo nell'ora", "minimum"),
+                     ("temperature_max", "massimo nell'ora", "maximum")):
+        ds[k] = ("time", h[k].values.astype(np.float32), dict(
+            long_name=f"temperatura: {ln}", units="degree_Celsius", cell_methods=cm.format(m)))
+    ds["n_samples"] = ("time", h.n_samples.values.astype(np.int32), dict(long_name="ping usati", units="1"))
+    ds["sampled_minutes"] = ("time", h.sampled_minutes.values.astype(np.int16), dict(
+        long_name="minuti dell'ora con misure", units="min",
+        comment="lo strumento misura solo durante i burst: la media e' sui minuti campionati"))
+    ds["temperature_qc"] = ("time", h.qc.values, dict(
+        long_name="flag di qualita' della temperatura oraria",
+        comment="1 = in posizione; 3 = meno di 30 s di dati; 4 = fuori posizione (in aria, discesa, "
+                "recupero); 9 = nessun dato", **FLAG_ATTRS))
+    ds = _station_coords(ds, md)
+    src = xr.Dataset(attrs=dict(src_attrs))
+    if deployment:
+        src.attrs.update(deployment_start=deployment["start"], deployment_end=deployment["end"],
+                         deployment_method=deployment.get("method", ""))
+    ds.attrs = _global_attrs(md, src, "temperature", h.index.values)
+    ds.attrs["featureType"] = "timeSeries"
+    ds.attrs["summary"] = ("Temperatura dell'acqua al fondo, media oraria di tutti i ping del sensore "
+                           "dello strumento (Teledyne RDI Sentinel V)")
+    return ds
+
+
+def write_archive(outdir: str, md: dict, hab: float, verbose: bool = True, p_min: float = 1.0) -> list:
     mh = md.get("instrument_height_above_bed_m")
     if mh is not None and abs(float(mh) - hab) > 1e-6:
         print(f"ATTENZIONE: --hab {hab} diverso da instrument_height_above_bed_m={mh} nei metadati: "
@@ -304,8 +378,63 @@ def write_archive(outdir: str, md: dict, hab: float, verbose: bool = True) -> li
         units = ", ".join(f"{k} [{wa[k].attrs.get('units', 'flag')}]" for k in cols)
         _write_csv(base + "_waves.csv", df, _csv_header(wa, f"# metodo: {wa.attrs['wave_method']}\n# colonne: {units}"))
         written.append(base + "_waves.csv")
+    # temperatura: media oraria da tutti i ping
+    try:
+        from .convert import load_inventory, StreamReader
+        from .deployment import get_deployment
+        inv = load_inventory(outdir)
+        name = next((n for n, s_ in inv["streams"].items() if s_.get("label") in ("waves", "currents")), None)
+    except FileNotFoundError:
+        name = None
+    if name:
+        r = StreamReader(outdir, name)
+        if "temperature" in r.variables():
+            dep = get_deployment(outdir, r, p_min=p_min)
+            h = hourly_temperature(r, dep, p_min=p_min)
+            ta = temperature_archive(h, md, r.attrs, dep)
+            base = os.path.join(adir, f"{sid}_{fmt(h.index.min())}_{fmt(h.index.max())}")
+            enc = _encoding(ta)
+            enc["time_bnds"] = dict(TIME_ENC)
+            ta.to_netcdf(base + "_temperature_hourly.nc", encoding=enc)
+            written.append(base + "_temperature_hourly.nc")
+            cols = ["temperature_mean", "temperature_std", "temperature_min", "temperature_max",
+                    "n_samples", "sampled_minutes", "qc"]
+            _write_csv(base + "_temperature_hourly.csv", h[cols], _csv_header(
+                ta, "# temperatura dell'acqua al fondo [degree_Celsius], media oraria; time_start = inizio "
+                    "dell'ora; qc: 1 in posizione, 3 pochi dati, 4 fuori posizione, 9 nessun dato"))
+            written.append(base + "_temperature_hourly.csv")
+            try:
+                _plot_temperature(h, os.path.join(outdir, "figures", "temperature_hourly.png"))
+            except Exception as e:
+                print(f"  (grafico temperatura non prodotto: {e})")
+        r.close()
     if verbose:
         print("\nArchivio:")
         for f in written:
             print(f"  {f}")
     return written
+
+
+def _plot_temperature(h, path):
+    import matplotlib.pyplot as plt
+    from . import plots as P
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fig, ax = plt.subplots(figsize=(11, 3.4), layout="constrained")
+    good = h.qc.values == 1
+    t = h.index.values
+    ax.plot(t, np.where(good, h.temperature_mean, np.nan), color=P.C1, lw=1.2, label="in posizione")
+    ax.plot(t[~good], h.temperature_mean.values[~good], "o", ms=2, color=P.AXIS,
+            label="fuori posizione / pochi dati (flag 3-4)")
+    ax.fill_between(t, np.where(good, h.temperature_min, np.nan), np.where(good, h.temperature_max, np.nan),
+                    color=P.C1, alpha=0.15, lw=0)
+    ax.set_ylabel("°C")
+    if good.any():
+        lo, hi = np.nanmin(h.temperature_min.values[good]), np.nanmax(h.temperature_max.values[good])
+        pad = max(0.2, 0.05 * (hi - lo))
+        ax.set_ylim(lo - pad, hi + pad)
+    nbad = int((h.qc.values != 1).sum())
+    ax.set_title("Temperatura al fondo, media oraria (banda: minimo-massimo nell'ora)"
+                 + (f"; {nbad} ore con flag 3/4/9, valori fuori scala non mostrati" if nbad else ""))
+    ax.legend(loc="best", ncols=2)
+    P._fmt_time(ax)
+    P._save(fig, path)

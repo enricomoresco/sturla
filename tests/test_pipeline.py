@@ -162,6 +162,16 @@ def test_trash_and_range(tmp_path):
     assert (w.wave_qc.values[w.wave_qc.values != 1] == 4).all()
     good = w.wave_qc.values == 1
     assert np.allclose(w.Hm0.values[good], tr["Hs"], rtol=0.12)
+    # temperatura oraria: in posizione 14.5-15.5 °C (flag 1), in aria 25 °C (flag 4)
+    th = xr.open_dataset(next(arch.glob("*_temperature_hourly.nc")))
+    q = th.temperature_qc.values
+    assert (q == 1).sum() >= 2 and (q == 4).sum() >= 2
+    assert np.all(np.abs(th.temperature.values[q == 1] - 15.0) <= 0.51)
+    assert np.all(th.temperature.values[q == 4] > 14.4)
+    assert th.temperature.attrs["cell_methods"].startswith("time: mean")
+    assert "time_bnds" in th
+    assert next(arch.glob("*_temperature_hourly.csv")).exists()
+    assert (out / "figures" / "temperature_hourly.png").exists()
     # 2) con --trim i dati fuori posizione spariscono
     out3 = tmp_path / "trim"
     process_pd0.main(["all", str(f), "-o", str(out3), "--trim"])
@@ -224,7 +234,7 @@ def test_archive(sentinel, tmp_path):
     assert c.attrs["Conventions"].startswith("CF-1.8") and c.attrs["station_id"] == "TEST"
     assert c.u.attrs["standard_name"] == "eastward_sea_water_velocity"
     assert c.temperature.attrs["standard_name"] == "sea_water_temperature"
-    np.testing.assert_allclose(c.temperature.values, 15.0, atol=0.01)
+    np.testing.assert_allclose(c.temperature.values, 15.0, atol=0.51)
     assert "deployment_qc" in c and "deployment_start" in c.attrs
     np.testing.assert_allclose(c.z.values[0], 1.68 + 0.5, atol=1e-4)     # quota sul fondale
     assert set(np.unique(c.vel_qc.values)) <= {1, 3, 4, 9}

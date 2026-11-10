@@ -220,7 +220,7 @@ def main(argv=None):
         run_plots(a)
     elif a.cmd == "archive":
         from adcp_pd0.archive import load_metadata, write_archive
-        write_archive(a.out, load_metadata(a.metadata), hab=a.hab)
+        write_archive(a.out, load_metadata(a.metadata), hab=a.hab, p_min=a.p_min)
     elif a.cmd == "deployment":
         from adcp_pd0.deployment import get_deployment
         name = pick_stream(a.out, "currents", a.currents_stream) or pick_stream(a.out, "waves", a.waves_stream)
@@ -241,7 +241,7 @@ def main(argv=None):
         w = run_waves(a)
         run_plots(a, qc, w)
         from adcp_pd0.archive import load_metadata, write_archive
-        write_archive(a.out, load_metadata(a.metadata), hab=a.hab)
+        write_archive(a.out, load_metadata(a.metadata), hab=a.hab, p_min=a.p_min)
 
 
 if __name__ == "__main__":
