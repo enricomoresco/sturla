@@ -45,7 +45,7 @@ Parametri principali (`python process_pd0.py all -h` per l'elenco completo):
 | `--corr-min`, `--pg-min`, `--err-max`, `--tilt-max` | soglie QC correnti | 64, 50 %, 0.2 m/s, 20° |
 | `--puv-cell` | cella (0-based) dello stream onde per la direzione, oppure `auto` | nessuna |
 | `--dir-ref` | riferimento per la direzione: `auto`, `vb` (beam verticale), `p` (pressione) | auto |
-| `--avg-minutes` | se le correnti si ricavano dai ping: finestre di N minuti invece dell'intero burst | burst |
+| `--avg-minutes` | correnti dai ping singoli: medie su intervalli regolari di N minuti; `0` = un profilo per burst | 60 (orarie) |
 | `--currents-stream`, `--waves-stream` | forza la scelta degli stream (nomi da `inspect`) | automatico |
 | `--orientation up/down` | forza l'orientamento | dal fixed leader |
 
@@ -108,8 +108,12 @@ Se `inspect` mostra **un solo stream** con `pings_per_ens 1`, dt 0.5 s e burst, 
   loro (≈ 2·r·tan 25°), confrontabile con la lunghezza d'onda delle onde corte; la
   direzione è quindi una stima di primo livello.
 
-Nel file di Sturla i burst sono di due tipi: **1024 ping (8.5 min)**, usati per le onde, e
-**180 ping (1.5 min)**, troppo corti per uno spettro. L'analisi onde usa solo i burst con
+Nel file di Sturla i burst sono di due tipi: **1024 ping (8.5 min) ogni 2 ore alle ore
+pari**, usati per le onde, e **180 ping (1.5 min) ogni ora alle HH:20**, troppo corti per uno
+spettro. Un profilo per burst darebbe una serie irregolare (intervalli 17/43/60 min): le
+correnti sono quindi **medie orarie** (ore di orologio, tempo = centro dell'ora, tutti i ping
+dell'ora: 180 o 1204), con le ore senza dati come righe vuote (flag 9). Nelle ore a cavallo
+di inizio/fine deployment si usano solo i ping in posizione (`in_position_frac`). L'analisi onde usa solo i burst con
 almeno 256 ping (`n_short_bursts_skipped` in `waves_bulk.nc` conta gli esclusi); le correnti
 usano tutti i burst (`n_pings` in `currents_avg.nc` dice su quanti ping è fatta ogni media).
 

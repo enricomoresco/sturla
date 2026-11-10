@@ -4,6 +4,7 @@ from __future__ import annotations
 import warnings
 
 import numpy as np
+import pandas as pd
 import xarray as xr
 
 from .transform import to_earth, rotate_declination
@@ -31,10 +32,14 @@ def qc_currents(ds: xr.Dataset, corr_min: int = 64, pg_min: float = 50.0, err_ma
     n0 = ds.sizes["time"]
     from .deployment import in_position
     pos = np.ones(n0, bool)
-    if deployment is not None:
-        pos &= in_position(ds.time.values, deployment)
-    if "pressure" in ds and float(ds.pressure.max()) > 0:
-        pos &= ds.pressure.values >= p_min
+    if "in_position_frac" in ds:
+        # medie dei ping già limitate ai ping in posizione: l'intervallo è valido se ne ha
+        pos &= np.nan_to_num(ds.in_position_frac.values) > 0
+    else:
+        if deployment is not None:
+            pos &= in_position(ds.time.values, deployment)
+        if "pressure" in ds and float(ds.pressure.max()) > 0:
+            pos &= ds.pressure.values >= p_min
     if trim:
         ds = ds.isel(time=np.flatnonzero(pos))
         pos = pos[pos]
@@ -107,7 +112,7 @@ def qc_currents(ds: xr.Dataset, corr_min: int = 64, pg_min: float = 50.0, err_ma
         out["echo_mean"] = (dims, ds.echo.values.mean(axis=-1).astype(np.float32),
                             dict(units="counts", long_name="intensita' eco media sui beam"))
     for k in ("heading", "pitch", "roll", "temperature", "pressure", "pressure_std", "n_pings",
-              "good_ping_frac"):
+              "good_ping_frac", "in_position_frac"):
         if k in ds:
             out[k] = ds[k]
     for k, f in flags.items():
@@ -139,15 +144,20 @@ def _circmean_deg(x, axis=0):
                                         np.nanmean(np.cos(r), axis=axis))), 360)
 
 
-def average_pings(reader, window_min: float | None = None, corr_min: int = 64,
+def average_pings(reader, window_min: float | None = None, corr_min: int = 64, bin_minutes: float | None = None,
                   min_good_frac: float = 0.5, orientation: str | None = None,
                   max_samples_per_load: int = 200_000, check_vb: bool = True,
+                  deployment: dict | None = None, p_min: float = 1.0,
                   verbose: bool = True) -> xr.Dataset:
     """Profili di corrente medi da uno stream di ping singoli (es. burst d'onda a 2 Hz).
 
     Ogni ping è portato in coordinate Earth con il proprio heading/pitch/roll, i ping con
-    correlazione < ``corr_min`` su qualche beam sono scartati, poi si media su ogni burst
-    (o su finestre di ``window_min`` minuti dentro il burst). Le celle con meno di
+    correlazione < ``corr_min`` su qualche beam sono scartati, poi si media:
+      - con ``bin_minutes`` (es. 60): su intervalli regolari di orologio (tutti i ping
+        dell'intervallo, anche di burst diversi); tempo = centro dell'intervallo; gli
+        intervalli senza dati diventano righe vuote (n_pings = 0), così la serie è regolare;
+      - altrimenti su ogni burst (o su finestre di ``window_min`` minuti dentro il burst).
+    Le celle con meno di
     ``min_good_frac`` ping validi sono NaN. Il risultato ha la stessa struttura di uno
     stream di correnti in coordinate Earth e può essere passato a ``qc_currents``.
     """
@@ -157,7 +167,16 @@ def average_pings(reader, window_min: float | None = None, corr_min: int = 64,
     a = dict(reader.attrs)
     t_all = reader.times()
     bursts, dt = find_bursts(t_all)
-    if window_min:
+    labels = None
+    if bin_minutes:
+        step = np.timedelta64(int(round(bin_minutes * 60)), "s")
+        tb = pd.DatetimeIndex(t_all).floor(f"{int(round(bin_minutes * 60))}s").values
+        brk = np.flatnonzero(tb[1:] != tb[:-1]) + 1
+        starts, ends = np.r_[0, brk], np.r_[brk, len(t_all)]
+        bursts = np.stack([starts, ends], axis=1)
+        labels = {int(s_): tb[s_] + step / 2 for s_ in starts}
+        grid = np.arange(tb[0], tb[-1] + step, step) + step / 2
+    elif window_min:
         w = max(1, int(round(window_min * 60 / dt)))
         bursts = np.array([[s, min(s + w, e)] for s, e in bursts for s in range(s, e, w)])
     groups, cur, n_cur = [], [], 0
@@ -173,7 +192,7 @@ def average_pings(reader, window_min: float | None = None, corr_min: int = 64,
     if check_vb:
         names.append("vb_vel")
     out = {k: [] for k in ("time", "vel", "corr", "echo", "good", "heading", "pitch", "roll",
-                           "temperature", "pressure", "pressure_std", "n_pings")}
+                           "temperature", "pressure", "pressure_std", "n_pings", "pos_frac")}
     vbstat = []
     rng = None
     for gi, grp in enumerate(groups):
@@ -187,6 +206,16 @@ def average_pings(reader, window_min: float | None = None, corr_min: int = 64,
             sel = np.flatnonzero((tt >= t_all[s]) & (tt <= t_all[e - 1]))
             if len(sel) == 0:
                 continue
+            # solo i ping in posizione, se ce ne sono (ore a cavallo di inizio/fine deployment)
+            pos = np.ones(len(sel), bool)
+            if deployment is not None:
+                from .deployment import in_position
+                pos &= in_position(tt[sel], deployment)
+            if "pressure" in ds:
+                pos &= ds.pressure.values[sel] >= p_min
+            pos_frac = float(pos.mean())
+            if pos.any():
+                sel = sel[pos]
             h, p, r = (ds[k].values[sel] for k in ("heading", "pitch", "roll"))
             ve = to_earth(ds.vel.values[sel], a, h, p, r, orientation)
             if "corr" in ds and corr_min:
@@ -204,8 +233,9 @@ def average_pings(reader, window_min: float | None = None, corr_min: int = 64,
                 for k in ("pitch", "roll", "temperature", "pressure"):
                     out[k].append(np.nanmean(ds[k].values[sel]) if k in ds else np.nan)
                 out["pressure_std"].append(np.nanstd(ds.pressure.values[sel]) if "pressure" in ds else np.nan)
-            out["time"].append(t_all[s] + (t_all[e - 1] - t_all[s]) / 2)
+            out["time"].append(labels[int(s)] if labels is not None else t_all[s] + (t_all[e - 1] - t_all[s]) / 2)
             out["n_pings"].append(len(sel))
+            out["pos_frac"].append(pos_frac)
             # verifica della trasformazione: w dai 4 beam contro il beam verticale, alla
             # cella a ~70% della distanza dalla superficie (dove le velocità orbitali sono
             # apprezzabili). Si salva per ogni burst; alla fine si usano i più energetici.
@@ -240,9 +270,16 @@ def average_pings(reader, window_min: float | None = None, corr_min: int = 64,
              good_ping_frac=(("time", "cell"), np.array(out["good"])),
              **{k: ("time", np.array(out[k], np.float32)) for k in
                 ("heading", "pitch", "roll", "temperature", "pressure", "pressure_std")},
-             n_pings=("time", np.array(out["n_pings"]))),
+             n_pings=("time", np.array(out["n_pings"])),
+             in_position_frac=("time", np.array(out["pos_frac"], np.float32),
+                               dict(long_name="frazione di ping in posizione nell'intervallo"))),
         coords=dict(time=np.array(out["time"]), cell=np.arange(1, len(rng) + 1),
                     range=("cell", rng), beam=np.arange(1, nb + 1)),
         attrs=attrs)
+    if bin_minutes:
+        res = res.reindex(time=grid)
+        res["n_pings"] = res.n_pings.fillna(0).astype(np.int32)
+        res.attrs.update(avg_bin_minutes=float(bin_minutes),
+                         avg_time_label="centro dell'intervallo di media")
     res["depth_xducer"] = res.pressure * 1e4 / (RHO * G)
     return res

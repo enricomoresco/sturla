@@ -123,6 +123,10 @@ def currents_archive(qc: xr.Dataset, md: dict, hab: float) -> xr.Dataset:
         dq = np.where(qc.in_position.values.astype(bool), 1, 4).astype(np.int8)
     else:
         dq = np.full(len(t), 2, np.int8)
+    if "n_pings" in qc:                       # intervalli senza misure: mancanti, non cattivi
+        empty = qc.n_pings.values == 0
+        dq[empty] = 9
+        flag[empty] = 9
     ds["deployment_qc"] = ("time", dq, dict(
         long_name="flag strumento in posizione sul fondo",
         comment="4 = fuori posizione (in aria, discesa, recupero): tutti i dati di quell'istante sono da scartare",
@@ -150,6 +154,10 @@ def currents_archive(qc: xr.Dataset, md: dict, hab: float) -> xr.Dataset:
     if "n_pings" in qc:
         ds["n_pings"] = ("time", qc.n_pings.values.astype(np.int32),
                          dict(long_name="numero di ping mediati", units="1"))
+    if "in_position_frac" in qc:
+        ds["in_position_frac"] = ("time", qc.in_position_frac.values.astype(np.float32), dict(
+            long_name="frazione di ping in posizione nell'intervallo", units="1",
+            comment="se > 0 la media usa solo i ping in posizione"))
     ds["u_davg"] = ("time", V("u_davg"), dict(long_name="velocita' Est media sulla verticale", units="m s-1"))
     ds["v_davg"] = ("time", V("v_davg"), dict(long_name="velocita' Nord media sulla verticale", units="m s-1"))
     ds["speed_davg"] = ("time", V("speed_davg"), dict(long_name="intensita' media sulla verticale", units="m s-1"))

@@ -45,8 +45,15 @@ def detect_deployment(reader, p_min: float = 1.0, tol_frac: float = 0.10, tol_mi
         raise ValueError("nessun periodo stabile in posizione trovato: controllare i parametri")
     i0 = int(np.argmax(run))
     i1 = int(len(run) - 1 - np.argmax(run[::-1])) + n - 1
-    start = m.index[i0] + pd.Timedelta(minutes=margin_min)
-    end = m.index[i1] + pd.Timedelta(minutes=1) - pd.Timedelta(minutes=margin_min)
+    # il margine serve solo se c'è una fase fuori posizione prima/dopo (non se i dati
+    # iniziano o finiscono con lo strumento già in posizione)
+    start = m.index[i0] + pd.Timedelta(minutes=margin_min if ok[:i0 + 1].size and not ok[:i0 + 1].all() else 0)
+    if i0 == 0:
+        start = pd.Timestamp(t[0])
+    tail_ok = ok[i1:].all()
+    end = m.index[i1] + pd.Timedelta(minutes=1) - pd.Timedelta(minutes=0 if tail_ok else margin_min)
+    if tail_ok:
+        end = pd.Timestamp(t[-1]) + pd.Timedelta(seconds=1)
     inside = (m.index >= start) & (m.index < end)
     res = dict(method="automatico", start=str(start), end=str(end), p_ref_dbar=round(p_ref, 3),
                tolerance_dbar=round(tol, 3), tilt_ref_deg=round(tilt_ref, 2),

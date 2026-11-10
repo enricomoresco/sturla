@@ -154,10 +154,16 @@ def test_trash_and_range(tmp_path):
     arch = out / "archive"
     c = xr.open_dataset(next(arch.glob("*_currents.nc")))
     w = xr.open_dataset(next(arch.glob("*_waves.nc")))
-    ins = c.deployment_qc.values == 1
-    assert (~ins).sum() >= 10                              # aria + discesa/risalita presenti, marcati
-    assert (c.vel_qc.values[~ins] == 4).all()
+    tt = c.time.values
+    assert (np.diff(tt) == np.timedelta64(1, "h")).all()      # serie oraria regolare
+    dq = c.deployment_qc.values
+    ins = dq == 1
+    assert ins.sum() == 3                                  # 00, 01, 02 (anche ore parziali)
+    assert (dq == 4).sum() >= 3                            # aria + discesa/risalita marcati
+    assert set(np.unique(dq)) <= {1, 4, 9}
+    assert (c.vel_qc.values[~ins] >= 4).all()
     assert np.isnan(c.u.values[~ins]).all()
+    assert np.isfinite(c.u.values[ins]).any(axis=1).all()
     assert w.wave_qc.values.tolist().count(1) >= 4
     assert (w.wave_qc.values[w.wave_qc.values != 1] == 4).all()
     good = w.wave_qc.values == 1

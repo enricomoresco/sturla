@@ -47,11 +47,11 @@ def run_currents(a):
             print("Nessuno stream utilizzabile per le correnti.")
             return None
         print(f"\nCorrenti: medie dei ping singoli dello stream {name} "
-              + (f"su finestre di {a.avg_minutes} min" if a.avg_minutes else "su ogni burst"))
+              + (f"su intervalli regolari di {a.avg_minutes:g} min" if a.avg_minutes else "su ogni burst"))
         r = StreamReader(a.out, name)
         dep = _deployment(a, r)
-        ds = average_pings(r, window_min=a.avg_minutes, corr_min=a.corr_min,
-                           orientation=a.orientation)
+        ds = average_pings(r, bin_minutes=a.avg_minutes or None, corr_min=a.corr_min,
+                           orientation=a.orientation, deployment=dep, p_min=a.p_min)
         ds.to_netcdf(os.path.join(a.out, "currents_avg.nc"))
         if "vb_echo" in r.variables():
             from adcp_pd0.diagnostics import check_transform
@@ -160,9 +160,9 @@ def main(argv=None):
         g.add_argument("--err-max", type=float, default=0.2, help="m/s")
         g.add_argument("--tilt-max", type=float, default=20)
         g.add_argument("--p-min", type=float, default=1.0, help="dbar: sotto = fuori acqua")
-        g.add_argument("--avg-minutes", type=float, default=None,
-                       help="se le correnti si ricavano dai ping singoli: finestre di N minuti "
-                            "(default: un profilo per burst)")
+        g.add_argument("--avg-minutes", type=float, default=60,
+                       help="correnti dai ping singoli: medie su intervalli regolari di N minuti "
+                            "(default 60 = orarie); 0 = un profilo per burst")
         g = sp.add_argument_group("onde")
         g.add_argument("--waves-stream", default=None)
         g.add_argument("--hab", type=float, default=0.5, help="altezza sensore sul fondo [m]")
