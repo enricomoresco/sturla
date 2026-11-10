@@ -175,11 +175,18 @@ def plot_waves_bulk(w, path):
     ax.set_ylabel("m")
     ax.set_title("Altezza d'onda significativa Hm0")
     ax = axs[1]
-    ax.plot(t, w.Tp, color=C1, marker="o", ms=2.5, label="Tp")
-    ax.plot(t, w.Tm02, color=C2, marker="o", ms=2.5, label="Tm02")
-    ax.legend(loc="best", ncols=2)
+    if has_vb:
+        ax.plot(t, w.Tp_vb, color=C1, marker="o", ms=2.5, label="Tp beam verticale")
+        ax.plot(t, w.Tm02_vb, color=C2, marker="o", ms=2.5, label="Tm02 beam verticale")
+        ax.plot(t, w.Tp, color=C3, marker="o", ms=2.5, label="Tp pressione")
+        ax.legend(loc="best", ncols=3)
+        ax.set_title("Periodi")
+    else:
+        ax.plot(t, w.Tp, color=C1, marker="o", ms=2.5, label="Tp")
+        ax.plot(t, w.Tm02, color=C2, marker="o", ms=2.5, label="Tm02")
+        ax.legend(loc="best", ncols=2)
+        ax.set_title("Periodi (da pressione)")
     ax.set_ylabel("s")
-    ax.set_title("Periodi (da pressione)")
     i = 2
     if has_dir:
         ax = axs[i]
@@ -189,7 +196,8 @@ def plot_waves_bulk(w, path):
         ax.set_yticks([0, 90, 180, 270, 360])
         ax.set_ylabel("° (provenienza)")
         ax.legend(loc="best", ncols=2)
-        ax.set_title("Direzione (PUV)")
+        ref = "superficie beam verticale" if float(np.nanmax(w.get("dir_ref_vb", np.zeros(1)))) > 0 else "pressione"
+        ax.set_title(f"Direzione di provenienza (cross-spettri {ref} - velocita')")
         i += 1
     ax = axs[i]
     ax.plot(t, w.depth, color=C1)

@@ -39,9 +39,40 @@ Parametri principali (`python process_pd0.py all -h` per l'elenco completo):
 | `--p-atm` | offset di pressione da sottrarre [dbar] (se il sensore non è stato azzerato in aria) | 0 |
 | `--declination` | declinazione magnetica [°] se **non** già impostata nello strumento (comando EB) | 0 |
 | `--corr-min`, `--pg-min`, `--err-max`, `--tilt-max` | soglie QC correnti | 64, 50 %, 0.2 m/s, 20° |
-| `--puv-cell` | cella (0-based) dello stream onde per la direzione PUV | nessuna |
+| `--puv-cell` | cella (0-based) dello stream onde per la direzione, oppure `auto` | nessuna |
+| `--dir-ref` | riferimento per la direzione: `auto`, `vb` (beam verticale), `p` (pressione) | auto |
+| `--avg-minutes` | se le correnti si ricavano dai ping: finestre di N minuti invece dell'intero burst | burst |
 | `--currents-stream`, `--waves-stream` | forza la scelta degli stream (nomi da `inspect`) | automatico |
 | `--orientation up/down` | forza l'orientamento | dal fixed leader |
+
+## Caso tipico Sentinel V in modalità onde (un solo stream di ping a 2 Hz)
+
+Se `inspect` mostra **un solo stream** con `pings_per_ens 1`, dt 0.5 s e burst, e
+`coordinate registrate: BEAM` (`coord_xfrm 0`), allora:
+
+- **le correnti vengono ricavate dagli stessi ping**: ogni ping è portato in coordinate
+  Earth con il proprio heading/pitch/roll (usando la matrice beam→strumento registrata dallo
+  strumento, data type `0x3200`), i ping a bassa correlazione sono scartati e si fa la media
+  su ogni burst (o su finestre di `--avg-minutes`). Il risultato intermedio è in
+  `out/currents_avg.nc`, quello dopo QC in `out/currents_qc.nc`;
+- viene stampato un **controllo della trasformazione**: la correlazione fra la velocità
+  verticale ricavata dai 4 beam inclinati e quella misurata dal beam verticale. Un valore
+  vicino a +1 indica matrice e orientamento coerenti (non verifica però l'heading);
+- **in acqua profonda la pressione non vede le onde corte**: a ~34 m la funzione di
+  trasferimento taglia sopra ~0.12 Hz (periodi < 8 s), quindi Hm0 da pressione sottostima
+  molto. In questo caso il riferimento è **Hm0_vb** (superficie tracciata dal beam
+  verticale); `surface_found_frac` indica la frazione di ping in cui la superficie è stata
+  trovata. La direzione usa la superficie del beam verticale come riferimento
+  (`--dir-ref auto`) e le velocità di una cella (`--puv-cell auto` = cella a ~70% della
+  distanza dalla superficie). Attenzione: vicino alla superficie i 4 beam sono distanti fra
+  loro (≈ 2·r·tan 25°), confrontabile con la lunghezza d'onda delle onde corte; la
+  direzione è quindi una stima di primo livello.
+
+Comando consigliato:
+
+```bash
+python process_pd0.py all sturla_20260707T125042.pd0 -o out --hab <altezza sul fondo> --puv-cell auto --start <...> --end <...>
+```
 
 ## Output (`out/`)
 
@@ -84,8 +115,8 @@ qc.speed.plot(x="time", y="range")
   dimensione del file.
 - **Data type letti**: fixed/variable leader, velocità, correlazione, eco, percent good,
   beam verticale del Sentinel V (leader `0x0F01`, velocità `0x0A00`, correlazione `0x0B00`,
-  eco `0x0C00`, percent good `0x0D00`). Gli altri data type vengono elencati da `inspect`
-  ma non decodificati.
+  eco `0x0C00`, percent good `0x0D00`), matrice di trasformazione (`0x3200`). I blocchi
+  `sentinel_0x7000`…`0x7004` sono elencati da `inspect` ma non decodificati.
 - **Correnti** (`currents.py`): taglio temporale, scarto fuori acqua (p < 1 dbar),
   trasformazione in coordinate Earth se registrato in beam/instrument, rotazione per la
   declinazione, maschere su correlazione, percent good, velocità d'errore, tilt e

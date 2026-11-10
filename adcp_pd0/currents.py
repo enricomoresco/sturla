@@ -41,7 +41,7 @@ def qc_currents(ds: xr.Dataset, corr_min: int = 64, pg_min: float = 50.0, err_ma
 
     bad = ~np.isfinite(u) | ~np.isfinite(v)
     flags = {}
-    if "corr" in ds and corr_min:
+    if "corr" in ds and corr_min and a.get("averaged_from") != "single pings":
         f = ds.corr.values.min(axis=-1) < corr_min
         flags["flag_corr"] = f
         bad |= f
@@ -116,3 +116,108 @@ def qc_currents(ds: xr.Dataset, corr_min: int = 64, pg_min: float = 50.0, err_ma
                           qc_tilt_max=tilt_max, qc_p_min=p_min, declination=declination,
                           n_ensembles_raw=n0, coord_system_out="earth"))
     return out
+
+
+def _circmean_deg(x, axis=0):
+    r = np.deg2rad(x)
+    return np.mod(np.degrees(np.arctan2(np.nanmean(np.sin(r), axis=axis),
+                                        np.nanmean(np.cos(r), axis=axis))), 360)
+
+
+def average_pings(reader, window_min: float | None = None, corr_min: int = 64,
+                  min_good_frac: float = 0.5, orientation: str | None = None,
+                  max_samples_per_load: int = 200_000, check_vb: bool = True,
+                  verbose: bool = True) -> xr.Dataset:
+    """Profili di corrente medi da uno stream di ping singoli (es. burst d'onda a 2 Hz).
+
+    Ogni ping è portato in coordinate Earth con il proprio heading/pitch/roll, i ping con
+    correlazione < ``corr_min`` su qualche beam sono scartati, poi si media su ogni burst
+    (o su finestre di ``window_min`` minuti dentro il burst). Le celle con meno di
+    ``min_good_frac`` ping validi sono NaN. Il risultato ha la stessa struttura di uno
+    stream di correnti in coordinate Earth e può essere passato a ``qc_currents``.
+    """
+    from .transform import to_earth
+    from .waves import find_bursts
+
+    a = dict(reader.attrs)
+    t_all = reader.times()
+    bursts, dt = find_bursts(t_all)
+    if window_min:
+        w = max(1, int(round(window_min * 60 / dt)))
+        bursts = np.array([[s, min(s + w, e)] for s, e in bursts for s in range(s, e, w)])
+    groups, cur, n_cur = [], [], 0
+    for b in bursts:
+        cur.append(b)
+        n_cur += b[1] - b[0]
+        if n_cur >= max_samples_per_load:
+            groups.append(cur)
+            cur, n_cur = [], 0
+    if cur:
+        groups.append(cur)
+    names = ["vel", "corr", "echo", "heading", "pitch", "roll", "temperature", "pressure"]
+    if check_vb:
+        names.append("vb_vel")
+    out = {k: [] for k in ("time", "vel", "corr", "echo", "good", "heading", "pitch", "roll",
+                           "temperature", "pressure", "pressure_std", "n_pings")}
+    vbstat = []
+    rng = None
+    for gi, grp in enumerate(groups):
+        t0 = t_all[grp[0][0]]
+        t1 = t_all[grp[-1][1] - 1] + np.timedelta64(1, "us")
+        ds = reader.load(names, t0, t1)
+        if rng is None:
+            rng = ds.range.values
+        tt = ds.time.values
+        for s, e in grp:
+            sel = np.flatnonzero((tt >= t_all[s]) & (tt <= t_all[e - 1]))
+            if len(sel) == 0:
+                continue
+            h, p, r = (ds[k].values[sel] for k in ("heading", "pitch", "roll"))
+            ve = to_earth(ds.vel.values[sel], a, h, p, r, orientation)
+            if "corr" in ds and corr_min:
+                ve = np.where((ds.corr.values[sel].min(axis=-1) < corr_min)[..., None], np.nan, ve)
+            good = np.isfinite(ve[..., 0]).mean(axis=0)
+            with np.errstate(all="ignore"), warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                m = np.nanmean(ve, axis=0)
+                m[good < min_good_frac] = np.nan
+                out["vel"].append(m.astype(np.float32))
+                out["corr"].append(ds.corr.values[sel].mean(axis=0).astype(np.float32))
+                out["echo"].append(ds.echo.values[sel].mean(axis=0).astype(np.float32))
+                out["good"].append(good.astype(np.float32))
+                out["heading"].append(_circmean_deg(h))
+                for k in ("pitch", "roll", "temperature", "pressure"):
+                    out[k].append(np.nanmean(ds[k].values[sel]) if k in ds else np.nan)
+                out["pressure_std"].append(np.nanstd(ds.pressure.values[sel]) if "pressure" in ds else np.nan)
+            out["time"].append(t_all[s] + (t_all[e - 1] - t_all[s]) / 2)
+            out["n_pings"].append(len(sel))
+            # verifica della trasformazione: w dai 4 beam contro il beam verticale
+            if check_vb and "vb_vel" in ds and "vb_range" in ds and len(vbstat) < 50:
+                iv = np.argmin(np.abs(ds.vb_range.values - rng[len(rng) // 3]))
+                ic = len(rng) // 3
+                x, y = ve[:, ic, 2], ds.vb_vel.values[sel, iv]
+                ok = np.isfinite(x) & np.isfinite(y)
+                if ok.sum() > 50 and np.std(x[ok]) > 0 and np.std(y[ok]) > 0:
+                    vbstat.append(np.corrcoef(x[ok], y[ok])[0, 1])
+        if verbose:
+            print(f"  medie ping: gruppo {gi + 1}/{len(groups)} ({len(out['time'])} profili)", flush=True)
+    attrs = dict(a)
+    attrs.update(coord_system="earth", averaged_from="single pings", avg_window_min=window_min or 0,
+                 avg_corr_min=corr_min, avg_min_good_frac=min_good_frac)
+    attrs.pop("transformation_matrix", None)
+    if vbstat:
+        attrs["corr_w4beam_vs_vbeam"] = float(np.median(vbstat))
+    dims = ("time", "cell", "beam")
+    nb = out["vel"][0].shape[-1]
+    res = xr.Dataset(
+        dict(vel=(dims, np.array(out["vel"])), corr=(dims, np.array(out["corr"])),
+             echo=(dims, np.array(out["echo"])),
+             good_ping_frac=(("time", "cell"), np.array(out["good"])),
+             **{k: ("time", np.array(out[k], np.float32)) for k in
+                ("heading", "pitch", "roll", "temperature", "pressure", "pressure_std")},
+             n_pings=("time", np.array(out["n_pings"]))),
+        coords=dict(time=np.array(out["time"]), cell=np.arange(1, len(rng) + 1),
+                    range=("cell", rng), beam=np.arange(1, nb + 1)),
+        attrs=attrs)
+    res["depth_xducer"] = res.pressure * 1e4 / (RHO * G)
+    return res

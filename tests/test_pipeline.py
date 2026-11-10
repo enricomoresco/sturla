@@ -85,3 +85,48 @@ def test_cli_all(data, tmp_path):
               "waves_spectrogram.png", "waves_burst_example.png"):
         assert f in figs
     assert (out / "currents_qc.nc").exists() and (out / "waves_bulk.nc").exists()
+
+
+@pytest.fixture(scope="module")
+def sentinel(tmp_path_factory):
+    from synthetic import make_sentinel_like
+    d = tmp_path_factory.mktemp("sv")
+    f = d / "sv.pd0"
+    truth = make_sentinel_like(str(f))
+    out = d / "out"
+    inv = convert_files([str(f)], str(out), verbose=False)
+    return dict(file=str(f), out=str(out), truth=truth, inv=inv)
+
+
+def test_sentinel_like_currents(sentinel):
+    from adcp_pd0.currents import average_pings
+    inv, tr = sentinel["inv"], sentinel["truth"]
+    assert [s["label"] for s in inv["streams"].values()] == ["waves"]
+    name = pick_stream(sentinel["out"], "waves")
+    r = StreamReader(sentinel["out"], name)
+    assert r.attrs["coord_system"] == "beam"
+    assert np.asarray(r.attrs["transformation_matrix"]).size == 16
+    avg = average_pings(r, verbose=False)
+    assert avg.sizes["time"] == tr["bursts"]
+    assert avg.attrs["corr_w4beam_vs_vbeam"] > 0.9
+    qc = qc_currents(avg)
+    ok = ~tr["side"]
+    np.testing.assert_allclose(np.nanmean(qc.u.values, 0)[ok][:-2], (tr["U"] * tr["prof"])[ok][:-2], atol=0.01)
+    np.testing.assert_allclose(np.nanmean(qc.v.values, 0)[ok][:-2], (tr["V"] * tr["prof"])[ok][:-2], atol=0.01)
+
+
+def test_sentinel_like_waves(sentinel):
+    tr = sentinel["truth"]
+    r = StreamReader(sentinel["out"], pick_stream(sentinel["out"], "waves"))
+    w = analyze_waves(r, hab=tr["hab"], puv_cell=20, verbose=False)
+    assert np.allclose(w.Hm0_vb, tr["Hs"], rtol=0.12)
+    assert np.allclose(w.Tp_vb, tr["Tp"], rtol=0.06)
+    assert np.allclose(w.Dp, tr["dir_from"], atol=5)
+    assert (w.dir_ref_vb == 1).all()
+
+
+def test_sentinel_like_cli(sentinel, tmp_path):
+    out = tmp_path / "cli"
+    process_pd0.main(["all", sentinel["file"], "-o", str(out), "--puv-cell", "20"])
+    assert (out / "currents_qc.nc").exists() and (out / "currents_avg.nc").exists()
+    assert (out / "figures" / "currents_sections.png").exists()

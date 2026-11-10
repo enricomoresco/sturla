@@ -3,11 +3,40 @@
 ATTENZIONE: verificare sul proprio strumento. Se il Sentinel V ha registrato già in
 coordinate Earth (EX11111, caso più comune) queste funzioni non vengono usate.
 """
+import warnings
+
 import numpy as np
 
 
-def beam_to_inst(vb: np.ndarray, beam_angle_deg: float, convex: bool = True) -> np.ndarray:
-    """vb[..., 4] (beam 1-4) -> [..., 4] (X, Y, Z, errore). Solo soluzioni a 4 beam."""
+def theoretical_matrix(beam_angle_deg: float, convex: bool = True) -> np.ndarray:
+    """Matrice beam -> strumento teorica RDI (righe: X, Y, Z, errore)."""
+    th = np.deg2rad(beam_angle_deg)
+    a, b = 1.0 / (2.0 * np.sin(th)), 1.0 / (4.0 * np.cos(th))
+    d = a / np.sqrt(2.0)
+    c = 1.0 if convex else -1.0
+    return np.array([[c * a, -c * a, 0, 0], [0, 0, -c * a, c * a], [b, b, b, b], [d, d, -d, -d]])
+
+
+def instrument_matrix(attrs: dict):
+    """Matrice registrata dallo strumento (data type 0x3200), se presente e plausibile."""
+    T = attrs.get("transformation_matrix")
+    if T is None:
+        return None
+    T = np.asarray(T, float).reshape(4, 4)
+    mx = np.abs(T).max()
+    if not np.isfinite(T).all() or not (0.3 < mx < 3.0):
+        warnings.warn(f"matrice di trasformazione del file non plausibile (max {mx:.3g}): uso quella teorica")
+        return None
+    return T
+
+
+def beam_to_inst(vb: np.ndarray, beam_angle_deg: float, convex: bool = True, tmat=None) -> np.ndarray:
+    """vb[..., 4] (beam 1-4) -> [..., 4] (X, Y, Z, errore). Solo soluzioni a 4 beam.
+
+    Se ``tmat`` (4x4) è dato si usa quella (es. la matrice registrata dallo strumento)."""
+    if tmat is not None:
+        return np.einsum("ij,...j->...i", np.asarray(tmat, np.float32),
+                         vb[..., :4].astype(np.float32)).astype(np.float32)
     th = np.deg2rad(beam_angle_deg)
     a = 1.0 / (2.0 * np.sin(th))
     b = 1.0 / (4.0 * np.cos(th))
@@ -56,7 +85,8 @@ def to_earth(vel, attrs, heading, pitch, roll, orientation=None):
     if cs == "ship":
         raise NotImplementedError("coordinate 'ship': rotazione non implementata")
     if cs == "beam":
-        vel = beam_to_inst(vel[..., :4], attrs.get("beam_angle_deg", 25), bool(attrs.get("convex", 1)))
+        vel = beam_to_inst(vel[..., :4], attrs.get("beam_angle_deg", 25), bool(attrs.get("convex", 1)),
+                           tmat=instrument_matrix(attrs))
     return inst_to_earth(vel, heading, pitch, roll, orientation)
 
 

@@ -16,6 +16,7 @@ import numpy as np
 
 from adcp_pd0 import (convert_files, inspect_files, StreamReader, pick_stream, qc_currents,
                       analyze_waves)
+from adcp_pd0.currents import average_pings
 from adcp_pd0 import plots
 
 
@@ -29,12 +30,26 @@ def _aux_dataset(reader, max_points=200_000):
 
 def run_currents(a):
     name = pick_stream(a.out, "currents", a.currents_stream)
-    if name is None:
-        print("Nessuno stream di correnti trovato.")
-        return None
-    print(f"\nCorrenti: stream {name}")
-    r = StreamReader(a.out, name)
-    ds = r.load()
+    if name is not None:
+        print(f"\nCorrenti: stream {name}")
+        r = StreamReader(a.out, name)
+        ds = r.load()
+    else:
+        # nessuno stream di profili mediati: si mediano i ping singoli dello stream onde
+        name = pick_stream(a.out, "waves", a.waves_stream)
+        if name is None:
+            print("Nessuno stream utilizzabile per le correnti.")
+            return None
+        print(f"\nCorrenti: medie dei ping singoli dello stream {name} "
+              + (f"su finestre di {a.avg_minutes} min" if a.avg_minutes else "su ogni burst"))
+        r = StreamReader(a.out, name)
+        ds = average_pings(r, window_min=a.avg_minutes, corr_min=a.corr_min,
+                           orientation=a.orientation)
+        ds.to_netcdf(os.path.join(a.out, "currents_avg.nc"))
+        if "corr_w4beam_vs_vbeam" in ds.attrs:
+            c = ds.attrs["corr_w4beam_vs_vbeam"]
+            print(f"  controllo trasformazione: correlazione w(4 beam) - velocita' beam verticale = {c:+.2f}"
+                  + ("  [OK]" if abs(c) > 0.7 else "  [BASSA: verificare trasformazione/orientamento]"))
     qc = qc_currents(ds, corr_min=a.corr_min, pg_min=a.pg_min, err_max=a.err_max,
                      tilt_max=a.tilt_max, p_min=a.p_min, declination=a.declination,
                      orientation=a.orientation, t_start=a.start, t_end=a.end)
@@ -42,7 +57,7 @@ def run_currents(a):
     enc = {k: dict(zlib=True, complevel=1) for k in qc.data_vars}
     qc.to_netcdf(path, encoding=enc)
     good = np.isfinite(qc.u.values).mean() * 100
-    print(f"  {qc.sizes['time']:,} ensemble dopo il taglio, {good:.1f}% celle valide -> {path}")
+    print(f"  {qc.sizes['time']:,} profili dopo il taglio, {good:.1f}% celle valide -> {path}")
     r.close()
     return qc
 
@@ -56,7 +71,7 @@ def run_waves(a):
     r = StreamReader(a.out, name)
     w = analyze_waves(r, hab=a.hab, p_atm=a.p_atm, nperseg=a.nperseg, fmin=a.fmin, fmax=a.fmax,
                       kp2_min=a.kp2_min, use_vb=not a.no_vb, puv_cell=a.puv_cell,
-                      orientation=a.orientation, declination=a.declination)
+                      orientation=a.orientation, declination=a.declination, dir_ref=a.dir_ref)
     if a.start or a.end:
         w = w.sel(time=slice(a.start, a.end))
     path = os.path.join(a.out, "waves_bulk.nc")
@@ -106,6 +121,9 @@ def main(argv=None):
         g.add_argument("--err-max", type=float, default=0.2, help="m/s")
         g.add_argument("--tilt-max", type=float, default=20)
         g.add_argument("--p-min", type=float, default=1.0, help="dbar: sotto = fuori acqua")
+        g.add_argument("--avg-minutes", type=float, default=None,
+                       help="se le correnti si ricavano dai ping singoli: finestre di N minuti "
+                            "(default: un profilo per burst)")
         g = sp.add_argument_group("onde")
         g.add_argument("--waves-stream", default=None)
         g.add_argument("--hab", type=float, default=0.5, help="altezza sensore sul fondo [m]")
@@ -114,9 +132,11 @@ def main(argv=None):
         g.add_argument("--fmin", type=float, default=0.04)
         g.add_argument("--fmax", type=float, default=0.6)
         g.add_argument("--kp2-min", type=float, default=0.05)
-        g.add_argument("--puv-cell", type=int, default=None,
-                       help="cella (0-based) per la direzione PUV; default: nessuna")
+        g.add_argument("--puv-cell", type=lambda x: x if x == "auto" else int(x), default=None,
+                       help="cella (0-based) per la direzione, oppure 'auto'; default: nessuna")
         g.add_argument("--no-vb", action="store_true", help="non usare il beam verticale")
+        g.add_argument("--dir-ref", choices=["auto", "vb", "p"], default="auto",
+                       help="riferimento per la direzione: superficie dal beam verticale o pressione")
 
     pc = sub.add_parser("convert", help="PD0 -> NetCDF")
     pc.add_argument("inputs", nargs="+")

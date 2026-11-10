@@ -45,6 +45,9 @@ ID_NAMES = {
     0x0D00: "vb_percent_good",
     0x0F01: "vb_leader",
     0x3200: "transformation_matrix",
+    # blocchi specifici Sentinel V (contenuto non documentato qui: non decodificati)
+    0x7000: "sentinel_0x7000", 0x7001: "sentinel_0x7001", 0x7002: "sentinel_0x7002",
+    0x7003: "sentinel_0x7003", 0x7004: "sentinel_0x7004",
 }
 
 COORD_NAMES = {0: "beam", 1: "instrument", 2: "ship", 3: "earth"}
@@ -174,7 +177,8 @@ def index_file(path: str, max_bytes: int | None = None, verbose: bool = True) ->
     idx = FileIndex(path=path, size=size, positions=positions, layout_id=lay_ids,
                     layouts=layouts, n_resync=n_resync,
                     stats=dict(bytes_scanned=end, bytes_in_ensembles=covered,
-                               bytes_skipped=end - covered, n_ensembles=len(positions)))
+                               bytes_skipped=max(0, end - covered), n_ensembles=len(positions),
+                               partial=end < size))
     idx._mm = mm  # tenuto aperto per la decodifica
     return idx
 
@@ -277,6 +281,9 @@ def decode_matrix(M: np.ndarray, lay: Layout) -> dict:
                 arr, n = _block(M, *b, nc * nb_eff, "u1")
                 if n == nc * nb_eff:
                     out[key] = arr.reshape(len(M), nc, nb_eff)
+    tm = lay.find("transformation_matrix")
+    if tm is not None and tm[1] >= 34:
+        out["tmat"] = _block(M, *tm, 16, "<i2")[0].astype(np.float32) / 10000.0
     vbl = lay.find("vb_leader")
     vbv = lay.find("vb_velocity")
     nvb = None
@@ -439,6 +446,8 @@ def to_dataset(d: dict, source: str = ""):
         attrs["vb_first_cell_cm"] = r0
         for k in vbk:
             dv[k] = (("time", "vb_cell"), d[k])
+    if "tmat" in d:
+        attrs["transformation_matrix"] = np.asarray(d["tmat"][0], np.float64)
     ds = xr.Dataset(dv, coords=coords, attrs=attrs)
     return ds
 

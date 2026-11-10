@@ -51,19 +51,28 @@ def _interp_gaps(x, max_frac=0.1):
     return x
 
 
-def surface_from_vb(echo, rng, depth_est, window=0.35):
+def surface_from_vb(echo, rng, depth_est, window=0.35, min_prominence=10.0):
     """Distanza della superficie dal trasduttore per ogni ping dal massimo di eco del beam
-    verticale (interpolazione parabolica). ``depth_est`` = profondità stimata del trasduttore."""
+    verticale (interpolazione parabolica). ``depth_est`` = profondità stimata del trasduttore.
+
+    Il ping è scartato (NaN) se il massimo cade sul bordo della finestra di ricerca o delle
+    celle disponibili, o se emerge meno di ``min_prominence`` counts dalla mediana del profilo.
+    """
     echo = echo.astype(np.float32)
+    n, nc = echo.shape
     lo, hi = depth_est * (1 - window), depth_est * (1 + window)
     m = (rng[None, :] >= np.atleast_1d(lo)[:, None]) & (rng[None, :] <= np.atleast_1d(hi)[:, None])
     e = np.where(m, echo, -np.inf)
     i = np.argmax(e, axis=1)
-    ok = np.isfinite(e[np.arange(len(e)), i]) & (i > 0) & (i < echo.shape[1] - 1)
-    i_c = np.clip(i, 1, echo.shape[1] - 2)
-    y0, y1, y2 = (echo[np.arange(len(e)), i_c + k] for k in (-1, 0, 1))
+    ar = np.arange(n)
+    i_c = np.clip(i, 1, nc - 2)
+    inner = (i > 0) & (i < nc - 1) & m[ar, np.clip(i - 1, 0, nc - 1)] & m[ar, np.clip(i + 1, 0, nc - 1)]
+    y0, y1, y2 = (echo[ar, i_c + k] for k in (-1, 0, 1))
+    prom = y1 - np.median(echo, axis=1)
+    ok = inner & m.any(axis=1) & (prom >= min_prominence)
     den = y0 - 2 * y1 + y2
-    delta = np.where(den != 0, 0.5 * (y0 - y2) / den, 0.0)
+    with np.errstate(all="ignore"):
+        delta = np.where(den != 0, 0.5 * (y0 - y2) / den, 0.0)
     delta = np.clip(delta, -0.5, 0.5)
     cs = rng[1] - rng[0]
     r = rng[i_c] + delta * cs
@@ -101,14 +110,16 @@ def _moments(f, S, band):
 def analyze_waves(reader, hab: float = 0.5, p_atm: float = 0.0, nperseg: int = 256,
                   fmin: float = 0.04, fmax: float = 0.6, kp2_min: float = 0.05,
                   min_samples: int = 256, use_vb: bool = True, puv_cell: int | None = None,
-                  orientation: str | None = None, declination: float = 0.0,
+                  orientation: str | None = None, declination: float = 0.0, dir_ref: str = "auto",
                   max_samples_per_load: int = 2_000_000, verbose: bool = True) -> xr.Dataset:
     """Statistiche d'onda per burst dallo stream onde.
 
     hab        : altezza del sensore di pressione/trasduttore sul fondo [m]
     p_atm      : offset da sottrarre alla pressione [dbar] (0 se il sensore è già azzerato in aria)
     kp2_min    : frequenza di taglio dove la funzione di trasferimento Kp^2 scende sotto questa soglia
-    puv_cell   : indice (0-based) della cella da usare per la direzione PUV (None = no)
+    puv_cell   : indice (0-based) della cella da usare per la direzione (None = no)
+    dir_ref    : riferimento per la direzione: "auto" (superficie dal beam verticale se c'è,
+                 altrimenti pressione), "vb" o "p"
     """
     t_all = reader.times()
     bursts, dt_med = find_bursts(t_all)
@@ -121,6 +132,18 @@ def analyze_waves(reader, hab: float = 0.5, p_atm: float = 0.0, nperseg: int = 2
     if has_vb:
         vars_needed.append("vb_echo")
     if puv_cell is not None and "vel" in reader.variables():
+        r0 = reader.load(["pressure", "range"], t_all[0], t_all[min(len(t_all) - 1, 2000)])
+        rng_c = r0.range.values
+        if puv_cell == "auto":
+            # cella a ~70% della distanza dalla superficie: compromesso fra attenuazione
+            # delle velocità orbitali e separazione orizzontale dei beam
+            d_s = float(np.nanmean(r0.pressure.values) - p_atm) * 1e4 / (RHO * G)
+            puv_cell = int(np.argmin(np.abs(rng_c - 0.7 * d_s)))
+        puv_cell = int(puv_cell)
+        if not 0 <= puv_cell < len(rng_c):
+            raise ValueError(f"--puv-cell {puv_cell} fuori dall'intervallo 0..{len(rng_c) - 1}")
+        if verbose:
+            print(f"  direzione: cella {puv_cell} (a {rng_c[puv_cell]:.2f} m dal trasduttore)")
         vars_needed.append("vel")
 
     rows, S_p, S_v = [], [], []
@@ -171,9 +194,11 @@ def analyze_waves(reader, hab: float = 0.5, p_atm: float = 0.0, nperseg: int = 2
             S_p.append(See)
             # superficie dal beam verticale
             Sv = nanS
+            eta_vb = None
             if has_vb:
                 rng = ds.vb_range.values
                 r = surface_from_vb(ds.vb_echo.values[sel], rng, np.full(n, depth_s))
+                row["surface_found_frac"] = float(np.isfinite(r).mean())
                 r = _interp_gaps(_despike(r), max_frac=0.15)
                 if r is not None:
                     fv, Sv = signal.welch(signal.detrend(r), fs=fs, nperseg=nseg, window="hann",
@@ -183,33 +208,45 @@ def analyze_waves(reader, hab: float = 0.5, p_atm: float = 0.0, nperseg: int = 2
                         row[kk + "_vb"] = vv
                     row["surface_range_vb"] = float(np.mean(r))
                     Sv = np.where(bv, Sv, np.nan)
+                    eta_vb = r - r.mean()
             S_v.append(Sv)
-            # direzione PUV
-            if "vel" in ds and okf.sum() >= 3:
+            # direzione: cross-spettri elevazione-velocità orizzontale (PUV / "SUV").
+            # Riferimento = superficie dal beam verticale se disponibile (non attenuata con la
+            # profondità), altrimenti la pressione.
+            if "vel" in ds:
+                if eta_vb is not None and dir_ref in ("auto", "vb"):
+                    ref, ref_name = eta_vb, "vb"
+                    Sref = np.nan_to_num(Sv)
+                    band = (f >= fmin) & (f <= fmax) & np.isfinite(Sv)
+                else:
+                    ref, ref_name = eta_p, "p"
+                    Sref = np.nan_to_num(See)
+                    band = okf
                 vel = ds.vel.values[sel]                    # (n, 1, beam)
                 ve = to_earth(vel, a, ds["heading"].values[sel], ds["pitch"].values[sel],
                               ds["roll"].values[sel], orientation)[:, 0, :]
                 uu = _interp_gaps(ve[:, 0].astype(float))
                 vv_ = _interp_gaps(ve[:, 1].astype(float))
-                if uu is not None and vv_ is not None:
+                if uu is not None and vv_ is not None and band.sum() >= 3:
                     if declination:
                         ang = np.deg2rad(declination)
                         uu, vv_ = uu * np.cos(ang) + vv_ * np.sin(ang), -uu * np.sin(ang) + vv_ * np.cos(ang)
                     kw = dict(fs=fs, nperseg=nseg, window="hann", noverlap=nseg // 2)
-                    _, Cpu = signal.csd(signal.detrend(eta_p), signal.detrend(uu), **kw)
-                    _, Cpv = signal.csd(signal.detrend(eta_p), signal.detrend(vv_), **kw)
+                    _, Cpu = signal.csd(signal.detrend(ref), signal.detrend(uu), **kw)
+                    _, Cpv = signal.csd(signal.detrend(ref), signal.detrend(vv_), **kw)
                     Cpu, Cpv = Cpu.real, Cpv.real
-                    ip = np.nanargmax(np.where(okf, See, -np.inf))
+                    ip = int(np.argmax(np.where(band, Sref, -np.inf)))
                     to_p = np.degrees(np.arctan2(Cpv[ip], Cpu[ip]))
-                    to_m = np.degrees(np.arctan2(np.sum(Cpv[okf]), np.sum(Cpu[okf])))
+                    to_m = np.degrees(np.arctan2(np.sum(Cpv[band]), np.sum(Cpu[band])))
                     row["Dp"] = (270.0 - to_p) % 360.0   # direzione di provenienza, da Nord orario
                     row["Dm"] = (270.0 - to_m) % 360.0
+                    row["dir_ref_vb"] = 1.0 if ref_name == "vb" else 0.0
             rows.append(row)
         if verbose:
             print(f"  onde: gruppo {gi + 1}/{len(groups)} ({len(rows)} burst)", flush=True)
 
     keys = ["n", "duration_s", "depth", "depth_sensor", "p_std", "fcut", "Hm0", "Tp", "Tm01", "Tm02",
-            "Hm0_vb", "Tp_vb", "Tm01_vb", "Tm02_vb", "surface_range_vb", "Dp", "Dm"]
+            "Hm0_vb", "Tp_vb", "Tm01_vb", "Tm02_vb", "surface_range_vb", "surface_found_frac", "Dp", "Dm", "dir_ref_vb"]
     keys = [k for k in keys if any(k in r for r in rows)]
     data = {k: ("time", np.array([r.get(k, np.nan) for r in rows], float)) for k in keys}
     units = dict(depth="m", depth_sensor="m", p_std="dbar", fcut="Hz", Hm0="m", Tp="s", Tm01="s",

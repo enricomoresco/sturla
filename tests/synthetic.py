@@ -143,3 +143,75 @@ def make_file(path, hours=12, depth=15.0, hab=0.5, Hs=1.0, Tp=8.0, dir_from=225.
             f.write(events[0][1][:50])                          # ensemble troncato in coda
     return dict(Hs=Hs, Tp=Tp, dir_from=dir_from, depth=depth, hab=hab, n_events=len(events),
                 hours=hours)
+
+
+def make_sentinel_like(path, bursts=8, interval_min=30, nping=1024, fs=2.0, depth=20.0, hab=0.5,
+                       Hs=1.0, Tp=6.0, dir_from=200.0, U=0.2, V=-0.1,
+                       heading=30.0, pitch=2.0, roll=-3.0, seed=0):
+    """Come il file reale ispezionato: un solo stream di ping singoli a 2 Hz in burst,
+    coordinate BEAM, beam verticale, matrice di trasformazione (0x3200), blocchi Sentinel
+    sconosciuti, niente percent good, fixed/variable leader più lunghi."""
+    import sys, os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from adcp_pd0.transform import theoretical_matrix, inst_to_earth_matrix
+
+    rng_ = np.random.default_rng(seed)
+    t0 = datetime(2026, 7, 10)
+    xd = depth - hab
+    cs, b1, csvb, r0vb = 50, 168, 50, 100
+    nc = int((xd + 2 - b1 / 100) / 0.5) + 1          # le celle arrivano oltre la superficie
+    nvb = int((xd + 3 - r0vb / 100) / 0.5) + 1
+    r_c = (b1 + np.arange(nc) * cs) / 100
+    r_vb = (r0vb + np.arange(nvb) * csvb) / 100
+    T = theoretical_matrix(25, True)
+    Tinv = np.linalg.inv(T)
+    tm_block = struct.pack("<H", 0x3200) + np.round(T.ravel() * 10000).astype("<i2").tobytes()
+    k = (2 * np.pi / Tp) ** 2 / G
+    for _ in range(60):
+        k = (2 * np.pi / Tp) ** 2 / (G * np.tanh(k * depth))
+    w = 2 * np.pi / Tp
+    amp = Hs / (2 * np.sqrt(2))
+    th_to = np.deg2rad(270 - dir_from)
+    z = r_c + hab                                   # quota sul fondo
+    prof = (z / depth) ** (1 / 7)
+    side = r_c > xd * np.cos(np.deg2rad(25)) - 0.5
+    n = 0
+    with open(path, "wb") as f:
+        for b in range(bursts):
+            tb = t0 + timedelta(minutes=interval_min * b)
+            ph = rng_.uniform(0, 2 * np.pi)
+            for i in range(nping):
+                tt = i / fs
+                eta = amp * np.cos(w * tt + ph)
+                uo = amp * w * np.cosh(k * z) / np.sinh(k * depth) * np.cos(w * tt + ph)
+                wo = amp * w * np.sinh(k * z) / np.sinh(k * depth) * np.sin(w * tt + ph)
+                enu = np.stack([U * prof + uo * np.cos(th_to), V * prof + uo * np.sin(th_to), wo], -1)
+                h_, p_, r_ = heading + rng_.normal(0, 0.5), pitch, roll
+                M = inst_to_earth_matrix([h_], [p_], [r_], "up")[0]
+                inst = enu @ M                      # = M^T enu
+                inst4 = np.concatenate([inst, np.zeros((nc, 1))], -1)
+                beam = inst4 @ Tinv.T
+                beam += rng_.normal(0, 0.01, beam.shape)
+                vel_mm = np.round(beam * 1000).astype(int)
+                vel_mm[side] = -32768
+                corr = np.full((nc, 4), 110)
+                corr[side] = 30
+                p_dbar = RHO * G * (xd + eta * np.cosh(k * hab) / np.cosh(k * depth)) / 1e4
+                fl = _fixed(nc, 4, 1, cs, b1, ex=0) + b"\x00"         # 60 B
+                vl = _variable(n, tb + timedelta(seconds=tt), p_dbar, h_, p_, r_) + b"\x00"  # 66 B
+                echo_vb = (60 + 120 * np.exp(-0.5 * ((r_vb - (xd + eta)) / 0.4) ** 2)).astype(int)
+                vbv = np.interp(r_vb + hab, z, wo)
+                lead = bytearray(40)
+                struct.pack_into("<HHHHH", lead, 0, 0x0F01, nvb, 1, csvb, r0vb)
+                blocks = [fl, vl, _arr_block(0x0100, vel_mm.ravel(), "<i2"),
+                          _arr_block(0x0200, corr.ravel(), "u1"),
+                          _arr_block(0x0300, np.full(nc * 4, 80), "u1"), bytes(lead),
+                          _arr_block(0x0A00, np.round(vbv * 1000), "<i2"),
+                          _arr_block(0x0B00, np.full(nvb, 110), "u1"),
+                          _arr_block(0x0C00, echo_vb, "u1"),
+                          struct.pack("<H", 0x7000) + bytes(14), tm_block,
+                          struct.pack("<H", 0x7004) + bytes(8)]
+                f.write(make_ensemble(blocks))
+                n += 1
+    return dict(Hs=Hs, Tp=Tp, dir_from=dir_from, U=U, V=V, depth=depth, hab=hab, bursts=bursts,
+                prof=prof, side=side, n=n)

@@ -197,30 +197,78 @@ class StreamReader:
             d.close()
 
 
+def burst_summary(t: np.ndarray) -> dict:
+    """Statistiche dei burst (numero, durata, intervallo) da un vettore di tempi."""
+    from .waves import find_bursts
+    t = np.unique(t[~np.isnat(t)])
+    b, med = find_bursts(t)
+    n = b[:, 1] - b[:, 0]
+    starts = t[b[:, 0]]
+    rep = np.diff(starts).astype("timedelta64[s]").astype(float) / 60 if len(starts) > 1 else np.array([np.nan])
+    return dict(n_bursts=len(b), dt_s=med, pings_median=int(np.median(n)), pings_min=int(n.min()),
+                pings_max=int(n.max()), duration_median_s=float(np.median(n) * med),
+                interval_median_min=float(np.median(rep)), interval_min_min=float(np.min(rep)),
+                interval_max_min=float(np.max(rep)), lengths=n)
+
+
 def inspect_files(files, max_mb: float | None = None) -> None:
     """Ispezione veloce: layout, data type, stream, periodo e campionamento (solo leader)."""
+    from .pd0 import describe_config, _decode_fixed, _v
+    from .transform import theoretical_matrix
     for f in expand_inputs(files):
         print(f"\n=== {f} ({os.path.getsize(f) / 2**20:,.1f} MB)")
         idx = index_file(f, max_bytes=None if max_mb is None else max_mb * 2**20, verbose=False)
         st = idx.stats
+        if st.get("partial"):
+            print(f"(analizzati solo i primi {st['bytes_scanned'] / 2**20:,.0f} MB)")
         print(f"ensemble: {st['n_ensembles']:,}  risincronizzazioni: {idx.n_resync}  "
               f"byte non attribuiti: {st['bytes_skipped']:,}")
         for i, l in enumerate(idx.layouts):
             print(f"  layout {i}: {l.count:,} ens x {l.nbytes + 2} B -> "
                   + ", ".join(f"{n}({s}B)" for n, s in zip(l.names(), l.sizes)))
+        # configurazione e matrice di trasformazione dal primo ensemble
+        lay = max(idx.layouts, key=lambda l: l.count)
+        p0 = int(idx.positions[idx.layout_id == idx.layouts.index(lay)][0])
+        M = np.frombuffer(idx._mm, np.uint8, count=lay.nbytes + 2, offset=p0)[None, :]
+        fl = {k: int(v[0]) for k, v in _decode_fixed(M, *lay.find("fixed_leader")).items()}
+        cfg = describe_config(fl)
+        print(f"  strumento: s/n {fl.get('serial')}, fw {fl['fw_ver']}.{fl['fw_rev']}, "
+              f"orientamento {cfg['orientation']}, angolo beam {cfg['beam_angle_deg']} gradi, "
+              f"coordinate registrate: {cfg['coord_system'].upper()}"
+              + (" (tilt usati)" if cfg["tilts_used"] else "") + (", bin mapping" if cfg["bin_mapping"] else ""))
+        tm = lay.find("transformation_matrix")
+        if tm is not None:
+            T = np.frombuffer(
+                M[0, tm[0] + 2:tm[0] + 34].tobytes(), "<i2").reshape(4, 4) / 10000.0
+            Tt = theoretical_matrix(cfg["beam_angle_deg"], bool(cfg["convex"]))
+            print("  matrice beam->strumento registrata (righe X, Y, Z, err)  |  teorica RDI:")
+            for r1, r2 in zip(T, Tt):
+                print("     " + " ".join(f"{x:7.4f}" for x in r1) + "   |  " + " ".join(f"{x:7.4f}" for x in r2))
         streams = {}
-        for name, cfg, d in iter_decode(idx, leaders_only=True):
-            streams.setdefault(name, dict(cfg=cfg, t=[], p=[]))
+        for name, scfg, d in iter_decode(idx, leaders_only=True):
+            streams.setdefault(name, dict(cfg=scfg, t=[], p=[], h=[], pr=[]))
             streams[name]["t"].append(d["time"])
+            streams[name]["h"].append(d["heading"])
+            streams[name]["pr"].append(np.hypot(d["pitch"], d["roll"]))
             if "pressure" in d:
                 streams[name]["p"].append(d["pressure"])
         for name, s in streams.items():
             t = np.sort(np.concatenate(s["t"]))
             t = t[~np.isnat(t)]
-            dt = np.diff(t).astype("timedelta64[ms]").astype(float) / 1000
-            med = np.median(dt) if len(dt) else np.nan
-            gaps = int((dt > max(5 * med, med + 1)).sum()) if len(dt) else 0
             p = np.concatenate(s["p"]) if s["p"] else np.array([np.nan])
-            print(f"  stream {name}: {len(t):,} ens, {t[0]} -> {t[-1]}, dt mediano {med:.2f} s, "
-                  f"interruzioni (burst) {gaps}, pressione {np.nanmin(p):.2f}..{np.nanmax(p):.2f} dbar")
+            h = np.concatenate(s["h"])
+            tilt = np.concatenate(s["pr"])
+            print(f"  stream {name}: {len(t):,} ens, {t[0]} -> {t[-1]}")
             print(f"      config: {s['cfg']}")
+            print(f"      pressione {np.nanmin(p):.2f}..{np.nanmax(p):.2f} dbar, heading "
+                  f"{np.nanmin(h):.1f}..{np.nanmax(h):.1f} gradi, tilt max {np.nanmax(tilt):.1f} gradi")
+            bs = burst_summary(t)
+            print(f"      dt mediano {bs['dt_s']:.2f} s; burst: {bs['n_bursts']}, ping per burst "
+                  f"mediana {bs['pings_median']} (min {bs['pings_min']}, max {bs['pings_max']}) = "
+                  f"{bs['duration_median_s'] / 60:.1f} min; intervallo fra inizi burst mediana "
+                  f"{bs['interval_median_min']:.1f} min (min {bs['interval_min_min']:.1f}, "
+                  f"max {bs['interval_max_min']:.1f})")
+            vals, cnt = np.unique(bs["lengths"], return_counts=True)
+            top = np.argsort(cnt)[::-1][:5]
+            print("      lunghezze burst piu' frequenti (ping x volte): "
+                  + ", ".join(f"{vals[i]}x{cnt[i]}" for i in top))
