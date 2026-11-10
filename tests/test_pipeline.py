@@ -189,3 +189,31 @@ def test_check_transform(sentinel, tmp_path):
     # orientamento sbagliato -> correlazione negativa: il controllo se ne accorge
     rows_bad = check_transform(r, None, n_bursts=1, orientation="down", verbose=False)
     assert rows_bad[0]["c_w4_deta"] < -0.9
+
+
+def test_archive(sentinel, tmp_path):
+    import json
+    import xarray as xr
+    md = json.load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                     "metadata_template.json")))
+    md.update(latitude=44.4, longitude=8.9, station_id="TEST")
+    mdf = tmp_path / "md.json"
+    mdf.write_text(json.dumps(md))
+    out = tmp_path / "o"
+    process_pd0.main(["all", sentinel["file"], "-o", str(out), "--puv-cell", "auto", "--metadata", str(mdf)])
+    files = os.listdir(out / "archive")
+    cur = [f for f in files if f.endswith("_currents.nc")][0]
+    wav = [f for f in files if f.endswith("_waves.nc")][0]
+    c = xr.open_dataset(out / "archive" / cur)
+    w = xr.open_dataset(out / "archive" / wav)
+    assert c.attrs["Conventions"].startswith("CF-1.8") and c.attrs["station_id"] == "TEST"
+    assert c.u.attrs["standard_name"] == "eastward_sea_water_velocity"
+    assert c.temperature.attrs["standard_name"] == "sea_water_temperature"
+    np.testing.assert_allclose(c.temperature.values, 15.0, atol=0.01)
+    np.testing.assert_allclose(c.z.values[0], 1.68 + 0.5, atol=1e-4)     # quota sul fondale
+    assert set(np.unique(c.vel_qc.values)) <= {1, 3, 4, 9}
+    assert float(c.latitude) == 44.4
+    assert w.Hm0.attrs["standard_name"] == "sea_surface_wave_significant_height"
+    assert np.allclose(w.Hm0, sentinel["truth"]["Hs"], rtol=0.12)
+    assert w.attrs["instrument_serial_number"] == "12345"
+    assert any(f.endswith("_waves.csv") for f in files) and any(f.endswith("_timeseries.csv") for f in files)

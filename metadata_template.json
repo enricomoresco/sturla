@@ -1,0 +1,21 @@
+{
+  "_istruzioni": "Compilare e salvare come metadata.json; i campi che iniziano con _ sono ignorati. Lasciare null se non noto.",
+  "station_id": "STURLA",
+  "title": "ADCP Sentinel V - Sturla (Genova): correnti, onde, temperatura al fondo",
+  "institution": null,
+  "project": null,
+  "creator_name": null,
+  "creator_email": null,
+  "license": null,
+  "latitude": null,
+  "longitude": null,
+  "geospatial_vertical_reference": "fondale (strumento appoggiato sul fondo, rivolto verso l'alto)",
+  "instrument_height_above_bed_m": 0.5,
+  "magnetic_declination_deg": null,
+  "magnetic_declination_applied": false,
+  "time_zone": "UTC (da verificare: orologio dello strumento)",
+  "deployment_id": null,
+  "deployment_start": null,
+  "deployment_end": null,
+  "comment": null
+}

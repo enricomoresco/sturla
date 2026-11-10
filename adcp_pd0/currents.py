@@ -97,7 +97,8 @@ def qc_currents(ds: xr.Dataset, corr_min: int = 64, pg_min: float = 50.0, err_ma
     if "echo" in ds:
         out["echo_mean"] = (dims, ds.echo.values.mean(axis=-1).astype(np.float32),
                             dict(units="counts", long_name="intensita' eco media sui beam"))
-    for k in ("heading", "pitch", "roll", "temperature", "pressure"):
+    for k in ("heading", "pitch", "roll", "temperature", "pressure", "pressure_std", "n_pings",
+              "good_ping_frac"):
         if k in ds:
             out[k] = ds[k]
     for k, f in flags.items():

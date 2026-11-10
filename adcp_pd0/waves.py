@@ -273,6 +273,8 @@ def analyze_waves(reader, hab: float = 0.5, p_atm: float = 0.0, nperseg: int = 2
     if has_vb:
         out["S_vb"] = (("time", "freq"), np.array(S_v), dict(units="m2 Hz-1",
                        long_name="spettro elevazione da superficie (beam verticale)"))
+    out.attrs.update({k: v for k, v in a.items() if k in ("serial", "fw_ver", "fw_rev", "source_file",
+                                                          "orientation", "beam_angle_deg")})
     out.attrs.update(dict(n_short_bursts_skipped=n_short, fs=fs, hab=hab, p_atm=p_atm, nperseg=nseg, fmin=fmin, fmax=fmax,
                           kp2_min=kp2_min, puv_cell=-1 if puv_cell is None else puv_cell,
                           note="Dp/Dm: direzione di PROVENIENZA, gradi da Nord in senso orario"))

@@ -154,12 +154,16 @@ def main(argv=None):
     pc.add_argument("--range", dest="byte_range", default=None, help=RANGE_HELP)
     for n in ("currents", "waves", "plots"):
         common(sub.add_parser(n))
+    par = sub.add_parser("archive", help="file d'archivio NetCDF (CF) e CSV")
+    common(par)
+    par.add_argument("--metadata", default=None, help="file JSON di metadati (vedi metadata_template.json)")
     pk = sub.add_parser("check", help="solo controllo trasformazione (burst piu' energetici)")
     common(pk)
     pk.add_argument("--n-bursts", type=int, default=10)
     pa = sub.add_parser("all", help="convert + currents + waves + plots")
     pa.add_argument("inputs", nargs="+")
     pa.add_argument("--range", dest="byte_range", default=None, help=RANGE_HELP)
+    pa.add_argument("--metadata", default=None, help="file JSON di metadati per l'archivio")
     common(pa)
 
     a = p.parse_args(argv)
@@ -173,6 +177,9 @@ def main(argv=None):
         run_waves(a)
     elif a.cmd == "plots":
         run_plots(a)
+    elif a.cmd == "archive":
+        from adcp_pd0.archive import load_metadata, write_archive
+        write_archive(a.out, load_metadata(a.metadata), hab=a.hab)
     elif a.cmd == "check":
         from adcp_pd0.diagnostics import check_transform
         r = StreamReader(a.out, pick_stream(a.out, "waves", a.waves_stream))
@@ -183,6 +190,8 @@ def main(argv=None):
         qc = run_currents(a)
         w = run_waves(a)
         run_plots(a, qc, w)
+        from adcp_pd0.archive import load_metadata, write_archive
+        write_archive(a.out, load_metadata(a.metadata), hab=a.hab)
 
 
 if __name__ == "__main__":

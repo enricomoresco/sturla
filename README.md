@@ -25,10 +25,11 @@ python process_pd0.py inspect /percorso/dati/*.pd0 --max-mb 200
 2. **Tutto in un comando** (conversione + QC correnti + onde + grafici):
 
 ```bash
-python process_pd0.py all /percorso/dati/ -o out --hab 0.6 --start 2025-06-01T12:00 --end 2025-07-15T08:00
+python process_pd0.py all /percorso/dati/ -o out --hab 0.6 --metadata metadata.json --start 2025-06-01T12:00 --end 2025-07-15T08:00
 ```
 
-   oppure i singoli passi: `convert`, `currents`, `waves`, `plots` (stessi parametri).
+   oppure i singoli passi: `convert`, `currents`, `waves`, `plots`, `archive`, `check`
+   (stessi parametri).
 
 Parametri principali (`python process_pd0.py all -h` per l'elenco completo):
 
@@ -121,6 +122,30 @@ Gli stream hanno un nome che descrive la configurazione, ad es. `c30x4_cs50_p60`
 30 celle × 4 beam, celle da 50 cm, 60 ping per ensemble; il suffisso `_vb` indica la presenza
 del beam verticale. La classificazione automatica: **waves** = stream con campionamento
 ≤ 2.5 s e interruzioni fra burst; **currents** = lo stream restante con più ensemble.
+
+## Archivio (NetCDF CF e CSV)
+
+Copiare `metadata_template.json` in `metadata.json`, compilarlo (stazione, coordinate,
+ente, licenza, altezza del telaio, fuso orario dell'orologio, ...) e lanciare:
+
+```bash
+python process_pd0.py archive -o out --hab 0.5 --metadata metadata.json
+```
+
+(il passo è incluso anche in `all`). In `out/archive/`:
+
+| file | contenuto |
+|---|---|
+| `<ID>_<inizio>_<fine>_currents.nc` | profili u, v, w, intensità, direzione, eco (tempo × quota sul fondale), flag `vel_qc`; serie al fondo: **temperatura**, pressione, profondità totale, heading/pitch/roll, n. ping; corrente media sulla verticale |
+| `<ID>_..._waves.nc` | Hm0, Tp, Tm01, Tm02, Dp, Dm, flag `wave_qc`/`direction_qc`, profondità, spettri S(f) |
+| `<ID>_..._timeseries.csv` | temperatura, pressione, profondità, assetto, corrente media sulla verticale |
+| `<ID>_..._waves.csv` | parametri d'onda e flag |
+| `<ID>_..._currents_{u,v,speed,direction,vel_qc}.csv` | matrici tempo × quota |
+
+I NetCDF seguono CF-1.8 / ACDD-1.3 (standard_name, unità, `height_above_sea_floor`,
+metadati globali, parametri di elaborazione con prefisso `proc_`). Flag secondo IOOS/QARTOD:
+1 buono, 2 non valutato, 3 sospetto, 4 cattivo, 9 mancante. La **temperatura** è quella del
+sensore nella testa dello strumento (acqua al fondo); la salinità non è misurata.
 
 ## Uso da Python / Jupyter
 
