@@ -81,9 +81,8 @@ python process_pd0.py all sturla_20260707T125042.pd0 -o out_prova --range 45%:55
 
 `--range INIZIO:FINE` accetta percentuali (`25%:75%`) o MB (`300:3400`); un estremo vuoto
 indica inizio/fine file (`5%:`). La lettura parte dal primo ensemble valido dopo INIZIO.
-Sull'elaborazione completa, oltre a `--start/--end` (taglio per data), ensemble e burst con
-pressione media < `--p-min` (default 1 dbar) sono comunque scartati come fuori acqua, e i
-byte non validi vengono saltati.
+Sul file intero non serve: i byte non validi vengono saltati e i dati fuori posizione
+marcati automaticamente (vedi sopra). `--range` resta utile per prove veloci.
 
 ## Caso tipico Sentinel V in modalità onde (un solo stream di ping a 2 Hz)
 
