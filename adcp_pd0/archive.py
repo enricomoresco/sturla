@@ -219,8 +219,8 @@ def currents_archive(qc: xr.Dataset, md: dict, hab: float) -> xr.Dataset:
             long_name="1 = telaio in movimento nell'intervallo (rotazione/inclinazione)", units="1"))
     ts = dict(
         temperature=("sea_water_temperature", "temperatura dell'acqua al fondo (sensore dello strumento)", "degree_Celsius"),
-        pressure=("sea_water_pressure", "pressione al sensore (media sul burst)", "dbar"),
-        heading=("platform_orientation", "heading (media circolare sul burst)", "degree"),
+        pressure=("sea_water_pressure", "pressione al sensore (media nell'intervallo)", "dbar"),
+        heading=("platform_orientation", "heading (media circolare nell'intervallo)", "degree"),
         pitch=("platform_pitch", "pitch", "degree"),
         roll=("platform_roll", "roll", "degree"),
     )
@@ -235,7 +235,7 @@ def currents_archive(qc: xr.Dataset, md: dict, hab: float) -> xr.Dataset:
             long_name="profondita' totale (pressione/(rho g) + quota sensore)",
             comment="rho = 1025 kg m-3, g = 9.81 m s-2; pressione assunta relativa (azzerata in aria)"))
     if "pressure_std" in qc:
-        ds["pressure_std"] = ("time", V("pressure_std"), dict(long_name="dev. std della pressione nel burst",
+        ds["pressure_std"] = ("time", V("pressure_std"), dict(long_name="dev. std della pressione nell'intervallo",
                                                              units="dbar"))
     if "n_pings" in qc:
         ds["n_pings"] = ("time", qc.n_pings.values.astype(np.int32),
@@ -535,6 +535,12 @@ def write_archive(outdir: str, md: dict, hab: float, verbose: bool = True, p_min
         written.append(rep)
     if r is not None:
         r.close()
+    guide = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "LEGGIMI_DATI.md")
+    if os.path.exists(guide):
+        import shutil
+        dst = os.path.join(adir, "LEGGIMI_DATI.md")
+        shutil.copyfile(guide, dst)
+        written.append(dst)
     if verbose:
         print("\nArchivio:")
         for f in written:

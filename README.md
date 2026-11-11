@@ -1,5 +1,8 @@
 # Preprocessing ADCP Sentinel V (.pd0): correnti e onde
 
+> **Guida ai dati prodotti** (cosa è stato fatto, dove si trova ogni dato, come leggere i
+> flag): [`LEGGIMI_DATI.md`](LEGGIMI_DATI.md), copiata anche in `out/archive/`.
+
 Codice Python per leggere i file binari **PD0** di un ADCP Teledyne RDI Sentinel V
 (anche alcuni GB), separare i dati di **corrente** da quelli di **onda**, fare un primo
 controllo di qualità e produrre grafici di quick-look.

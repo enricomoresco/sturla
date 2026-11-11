@@ -306,3 +306,4 @@ def test_motion_and_causes(tmp_path):
                 "## 6. Flag di qualita'", "fuori_posizione", "_temperature_hourly.nc"):
         assert txt in rep, txt
     assert "| 2026-07-10 0" in rep                       # riga della tabella dei movimenti
+    assert (arch / "LEGGIMI_DATI.md").exists()
