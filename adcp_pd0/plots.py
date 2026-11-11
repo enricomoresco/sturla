@@ -274,7 +274,7 @@ def plot_all(outdir, qc=None, waves=None, aux=None):
             plot_wave_burst(waves, os.path.join(fdir, "waves_burst_example.png"))
 
 
-def plot_temperature_overlays(h, wa, c, dep, fdir, n_bottom_cells=3):
+def plot_temperature_overlays(h, wa, c, dep, fdir, n_bottom_cells=3, n_surface_cells=3, surface_max_m=7.0):
     """Temperatura al fondo (media giornaliera, asse sinistro) sovrapposta a Hm0 e alla corrente
     al fondo (asse destro). ``h``: DataFrame orario (archive.hourly_temperature); ``wa``, ``c``:
     dataset d'archivio onde e correnti; ``dep``: deployment.json."""
@@ -357,3 +357,34 @@ def plot_temperature_overlays(h, wa, c, dep, fdir, n_bottom_cells=3):
                f"Corrente al fondo: intensità della media vettoriale delle {n_bottom_cells} celle più basse ({zl}), "
                "solo celle con flag 1-3. Assi y diversi: sinistra temperatura, destra corrente.",
                os.path.join(fdir, "temperatura_e_corrente_fondo.png"))
+
+    if c is not None and "water_depth" in c:
+        # corrente in superficie: le celle valide piu' alte, solo se entro surface_max_m dalla superficie
+        z = c.z.values
+        dist = c.water_depth.values[:, None] - z[None, :]
+        ok = np.isin(c.vel_qc.values, [1, 3]) & np.isfinite(c.u.values) & (dist <= surface_max_m)
+        us = np.full(c.sizes["time"], np.nan)
+        vs = us.copy()
+        dd = us.copy()
+        for i in range(len(us)):
+            idx = np.flatnonzero(ok[i])
+            if len(idx) >= n_surface_cells:
+                top = idx[np.argsort(z[idx])[-n_surface_cells:]]
+                us[i], vs[i] = c.u.values[i, top].mean(), c.v.values[i, top].mean()
+                dd[i] = dist[i, top].mean()
+        S = pd.Series(np.hypot(us, vs), index=pd.DatetimeIndex(c.time.values))
+        Sd = S.resample("1D").mean()
+        zl = (f"in mediana {np.nanmedian(dd):.1f} m sotto la superficie" if np.isfinite(dd).any() else "")
+        fig, ax = plt.subplots(figsize=(13, 5))
+        base(ax)
+        ax2 = ax.twinx()
+        ax2.plot(S.index, S.values, color=C_C, lw=0.5, alpha=0.3, label="Corrente in superficie, medie orarie")
+        ax2.plot(Sd.index + pd.Timedelta("12h"), Sd.values, color=C_C, lw=2,
+                 label="Corrente in superficie, media giornaliera")
+        ax2.set_ylabel("Intensità della corrente in superficie (m/s)")
+        if S.notna().any():
+            ax2.set_ylim(0, np.nanpercentile(S.values, 99.8) * 1.15)
+        finish(fig, ax, ax2, "Temperatura al fondo e corrente in superficie",
+               f"Corrente in superficie: intensità della media vettoriale delle {n_surface_cells} celle valide più alte "
+               f"(flag 1-3), solo se entro {surface_max_m:g} m dalla superficie ({zl}).\nAssi y diversi: sinistra "
+               "temperatura, destra corrente.", os.path.join(fdir, "temperatura_e_corrente_superficie.png"))

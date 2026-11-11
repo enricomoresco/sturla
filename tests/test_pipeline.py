@@ -309,3 +309,4 @@ def test_motion_and_causes(tmp_path):
     assert (arch / "LEGGIMI_DATI.md").exists()
     assert (out / "figures" / "temperatura_e_Hm0.png").exists()
     assert (out / "figures" / "temperatura_e_corrente_fondo.png").exists()
+    assert (out / "figures" / "temperatura_e_corrente_superficie.png").exists()
