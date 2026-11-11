@@ -529,6 +529,12 @@ def write_archive(outdir: str, md: dict, hab: float, verbose: bool = True, p_min
                 _plot_temperature(h, os.path.join(outdir, "figures", "temperature_hourly.png"))
             except Exception as e:
                 print(f"  (grafico temperatura non prodotto: {e})")
+    if h is not None:
+        try:
+            from .plots import plot_temperature_overlays
+            plot_temperature_overlays(h, wa, c, dep if name else None, os.path.join(outdir, "figures"))
+        except Exception as e:
+            print(f"  (grafici temperatura/onde/corrente non prodotti: {e})")
     if bases:
         from .report import write_report
         rep = write_report(outdir, md, hab, bases[0], c=c, wa=wa, h=h, written=list(written), reader=r)

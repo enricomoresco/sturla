@@ -272,3 +272,88 @@ def plot_all(outdir, qc=None, waves=None, aux=None):
             plot_waves_spectrogram(waves, os.path.join(fdir, "waves_spectrogram_vb.png"), "S_vb")
         if np.isfinite(waves.Hm0.values).any():
             plot_wave_burst(waves, os.path.join(fdir, "waves_burst_example.png"))
+
+
+def plot_temperature_overlays(h, wa, c, dep, fdir, n_bottom_cells=3):
+    """Temperatura al fondo (media giornaliera, asse sinistro) sovrapposta a Hm0 e alla corrente
+    al fondo (asse destro). ``h``: DataFrame orario (archive.hourly_temperature); ``wa``, ``c``:
+    dataset d'archivio onde e correnti; ``dep``: deployment.json."""
+    import pandas as pd
+    C_T, C_OUT, C_W, C_C = C1, "#e34948", C2, C3
+    Tin = h.temperature_mean.where(h.qc.isin([1, 3]))
+    Tout = h.temperature_mean.where(h.qc == 4)
+    d_in, d_out = Tin.resample("1D").mean(), Tout.resample("1D").mean()
+    # giorni misti (in parte in posizione, in parte no) esclusi, come il giorno del recupero
+    mixed = d_in.notna() & d_out.notna()
+    d_in, d_out = d_in[~mixed], d_out[~mixed]
+    ends = [pd.Timestamp(e["start"]) for e in (dep or {}).get("motion_events", [])]
+    s_in, s_end = (pd.Timestamp(dep["start"]), pd.Timestamp(dep["end"])) if dep else (None, None)
+
+    def base(ax):
+        ax.plot(d_in.index + pd.Timedelta("12h"), d_in.values, "-o", ms=3, lw=1.8, color=C_T,
+                label="Temperatura al fondo, media giornaliera (in posizione)")
+        if d_out.notna().any():
+            ax.plot(d_out.index + pd.Timedelta("12h"), d_out.values, "-o", ms=3, lw=1.8, color=C_OUT,
+                    label="Temperatura, periodo non affidabile (fuori posizione)")
+        if s_end is not None:
+            last = h.index.max() + pd.Timedelta("1h")
+            if s_end < last:
+                ax.axvspan(s_end, last, color=C_OUT, alpha=0.07, lw=0)
+            if s_in > h.index.min():
+                ax.axvspan(h.index.min(), s_in, color=C_OUT, alpha=0.07, lw=0)
+        for i, m in enumerate(ends):
+            ax.axvline(m, color=INK2, ls="--", lw=1.1, label="Movimento del telaio" if i == 0 else None)
+        ax.set_ylabel("Temperatura al fondo (°C)")
+        ax.grid(True, axis="y")
+        ax.grid(False, axis="x")
+        loc = mdates.MonthLocator()
+        ax.xaxis.set_major_locator(loc)
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+
+    def finish(fig, ax, ax2, title, note, path):
+        ax2.spines["right"].set_visible(True)
+        ax2.grid(False)
+        h1, l1 = ax.get_legend_handles_labels()
+        h2, l2 = ax2.get_legend_handles_labels()
+        ax.legend(h1 + h2, l1 + l2, loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3, fontsize=8.5)
+        ax.set_zorder(ax2.get_zorder() + 1)
+        ax.patch.set_visible(False)
+        ax.set_title(title)
+        ax.text(0.0, -0.30, note, color=MUTED, fontsize=8, transform=ax.transAxes, va="top")
+        _save(fig, path)
+
+    os.makedirs(fdir, exist_ok=True)
+    if wa is not None and "Hm0" in wa:
+        H = pd.Series(np.where(np.isin(wa.wave_qc.values, [1, 3]), wa.Hm0.values, np.nan),
+                      index=pd.DatetimeIndex(wa.time.values))
+        fig, ax = plt.subplots(figsize=(13, 5))
+        base(ax)
+        ax2 = ax.twinx()
+        ax2.plot(H.index, H.values, color=C_W, lw=0.9, alpha=0.85, label="Hm0 (flag 1-3)")
+        ax2.set_ylabel("Altezza d'onda significativa Hm0 (m)")
+        ax2.set_ylim(0, max(1.0, np.nanmax(H.values) * 1.15) if H.notna().any() else 1)
+        finish(fig, ax, ax2, "Temperatura al fondo e altezza d'onda significativa",
+               "Temperatura: media giornaliera delle medie orarie (giorni misti esclusi). Hm0: un valore per "
+               "burst d'onda. Assi y diversi: sinistra temperatura, destra Hm0.",
+               os.path.join(fdir, "temperatura_e_Hm0.png"))
+    if c is not None:
+        lo = np.argsort(c.z.values)[:n_bottom_cells]
+        ok = np.isin(c.vel_qc.values[:, lo], [1, 3])
+        with np.errstate(all="ignore"):
+            ub = np.nanmean(np.where(ok, c.u.values[:, lo], np.nan), axis=1)
+            vb = np.nanmean(np.where(ok, c.v.values[:, lo], np.nan), axis=1)
+        S = pd.Series(np.hypot(ub, vb), index=pd.DatetimeIndex(c.time.values))
+        Sd = S.resample("1D").mean()
+        zl = f"{c.z.values[lo].min():.1f}-{c.z.values[lo].max():.1f} m dal fondale"
+        fig, ax = plt.subplots(figsize=(13, 5))
+        base(ax)
+        ax2 = ax.twinx()
+        ax2.plot(S.index, S.values, color=C_C, lw=0.5, alpha=0.3, label=f"Corrente al fondo, medie orarie ({zl})")
+        ax2.plot(Sd.index + pd.Timedelta("12h"), Sd.values, color=C_C, lw=2, label="Corrente al fondo, media giornaliera")
+        ax2.set_ylabel("Intensità della corrente al fondo (m/s)")
+        if S.notna().any():
+            ax2.set_ylim(0, np.nanpercentile(S.values, 99.8) * 1.15)
+        finish(fig, ax, ax2, "Temperatura al fondo e corrente al fondo",
+               f"Corrente al fondo: intensità della media vettoriale delle {n_bottom_cells} celle più basse ({zl}), "
+               "solo celle con flag 1-3. Assi y diversi: sinistra temperatura, destra corrente.",
+               os.path.join(fdir, "temperatura_e_corrente_fondo.png"))

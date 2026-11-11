@@ -184,7 +184,7 @@ significato dei flag. I valori mancanti sono celle vuote; nei NetCDF il valore m
 | `currents_avg.nc` | medie orarie dei ping, prima dei controlli di qualità |
 | `currents_qc.nc` | correnti dopo i controlli, con i flag elementari (`flag_*`) |
 | `waves_bulk.nc` | parametri d'onda per burst, da beam verticale e da pressione |
-| `figures/` | grafici: `deployment.png`, `check_transform.png`, `currents_sections.png`, `currents_summary.png`, `waves_bulk.png`, `waves_spectrogram*.png`, `waves_burst_example.png`, `temperature_hourly.png`, `overview_*.png` |
+| `figures/` | grafici: `deployment.png`, `check_transform.png`, `currents_sections.png`, `currents_summary.png`, `waves_bulk.png`, `waves_spectrogram*.png`, `waves_burst_example.png`, `temperature_hourly.png`, `temperatura_e_Hm0.png` e `temperatura_e_corrente_fondo.png` (temperatura al fondo sovrapposta, con asse y secondario, a Hm0 e alla corrente al fondo), `overview_*.png` |
 
 ---
 
