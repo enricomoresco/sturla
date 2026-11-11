@@ -107,7 +107,7 @@ def _moments(f, S, band):
                 Tm01=m0 / m1 if m1 > 0 else np.nan, Tm02=np.sqrt(m0 / m2) if m2 > 0 else np.nan)
 
 
-def analyze_waves(reader, hab: float = 0.5, p_atm: float = 0.0, nperseg: int = 256,
+def analyze_waves(reader, hab: float = 0.6, p_atm: float = 0.0, nperseg: int = 256,
                   fmin: float = 0.04, fmax: float = 0.6, kp2_min: float = 0.05,
                   min_samples: int = 256, use_vb: bool = True, p_min: float = 1.0, puv_cell: int | None = None,
                   orientation: str | None = None, declination: float = 0.0, dir_ref: str = "auto",

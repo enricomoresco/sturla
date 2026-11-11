@@ -242,7 +242,7 @@ def test_archive(sentinel, tmp_path):
     assert c.temperature.attrs["standard_name"] == "sea_water_temperature"
     np.testing.assert_allclose(c.temperature.values, 15.0, atol=0.51)
     assert "deployment_qc" in c and "deployment_start" in c.attrs
-    np.testing.assert_allclose(c.z.values[0], 1.68 + 0.5, atol=1e-4)     # quota sul fondale
+    np.testing.assert_allclose(c.z.values[0], 1.68 + 0.6, atol=1e-4)     # quota sul fondale (hab predefinito 0.6 m)
     assert set(np.unique(c.vel_qc.values)) <= {1, 3, 4, 9}
     assert float(c.latitude) == 44.4
     assert w.Hm0.attrs["standard_name"] == "sea_surface_wave_significant_height"

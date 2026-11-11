@@ -10,7 +10,7 @@
   "latitude": null,
   "longitude": null,
   "geospatial_vertical_reference": "fondale (strumento appoggiato sul fondo, rivolto verso l'alto)",
-  "instrument_height_above_bed_m": 0.5,
+  "instrument_height_above_bed_m": 0.6,
   "magnetic_declination_deg": null,
   "magnetic_declination_applied": false,
   "time_zone": "UTC (da verificare: orologio dello strumento)",

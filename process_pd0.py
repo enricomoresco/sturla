@@ -5,8 +5,8 @@ Esempi:
   python process_pd0.py inspect dati/*.pd0 --max-mb 200
   python process_pd0.py convert dati/ -o out
   python process_pd0.py currents -o out --declination 2.5
-  python process_pd0.py waves -o out --hab 0.6
-  python process_pd0.py all dati/ -o out --hab 0.6
+  python process_pd0.py waves -o out
+  python process_pd0.py all dati/ -o out
 """
 import argparse
 import os
@@ -171,7 +171,8 @@ def main(argv=None):
                             "(default 60 = orarie); 0 = un profilo per burst")
         g = sp.add_argument_group("onde")
         g.add_argument("--waves-stream", default=None)
-        g.add_argument("--hab", type=float, default=0.5, help="altezza sensore sul fondo [m]")
+        g.add_argument("--hab", type=float, default=0.6,
+                       help="altezza del trasduttore sul fondale [m] (default 0.6, Sturla)")
         g.add_argument("--p-atm", type=float, default=0.0, help="offset pressione atmosferica [dbar]")
         g.add_argument("--nperseg", type=int, default=256)
         g.add_argument("--fmin", type=float, default=0.04)

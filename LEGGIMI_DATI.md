@@ -1,7 +1,8 @@
 # Guida ai dati ADCP di Sturla: cosa è stato fatto e dove si trova ogni dato
 
 Questa guida accompagna i dati dell'ADCP **Teledyne RDI Sentinel V** (n/s 597) posato sul
-fondale davanti a Sturla (Genova), a circa 34 m di profondità e rivolto verso l'alto. Spiega:
+fondale davanti a Sturla (Genova), a circa 34 m di profondità e rivolto verso l'alto, con
+il trasduttore a **0.6 m dal fondale**. Spiega:
 
 1. da quali misure si parte;
 2. tutte le operazioni fatte sui dati, nell'ordine;
@@ -82,8 +83,9 @@ il metodo e l'organizzazione dei file.
    - inclinazione > 20° → rimossa;
    - **celle troppo vicine alla superficie**, contaminate dal riflesso della superficie
      (side-lobe): oltre D·cos 25° − 1 cella, con D profondità del trasduttore → rimosse.
-6. **Quota delle celle sul fondale** = distanza dal trasduttore + altezza del telaio
-   (`--hab`).
+6. **Quota delle celle sul fondale** = distanza dal trasduttore + **0.6 m** (altezza del
+   trasduttore sul fondale, parametro `--hab`). Anche la profondità totale è profondità
+   del sensore + 0.6 m.
 7. **Controllo indipendente della trasformazione**: sotto un'onda la velocità verticale è in
    fase con la velocità di salita della superficie (dη/dt), misurata con l'eco del beam
    verticale. Sui burst più energetici della prova sul file intero (versione precedente
@@ -259,18 +261,18 @@ nella corsa definitiva riporta i valori esatti.
 
 ## 7. Come rifare l'elaborazione
 
-Nella cartella del codice, sostituisci `<altezza telaio>` con l'altezza del trasduttore
-sul fondo in metri:
+Nella cartella del codice (l'altezza del trasduttore sul fondale, 0.6 m, è il valore
+predefinito):
 
 ```bash
-python process_pd0.py all sturla_20260707T125042.pd0 -o out --hab <altezza telaio> --puv-cell auto --metadata metadata.json
+python process_pd0.py all sturla_20260707T125042.pd0 -o out --puv-cell auto --metadata metadata.json
 ```
 
 Se i dati sono già convertiti in `out/`, si può saltare la parte lenta (circa 6–10 minuti
 di lettura):
 
 ```bash
-python process_pd0.py all --skip-convert -o out --hab <altezza telaio> --puv-cell auto --metadata metadata.json
+python process_pd0.py all --skip-convert -o out --puv-cell auto --metadata metadata.json
 ```
 
 Il codice, con la documentazione dei comandi, è descritto in `README.md`.

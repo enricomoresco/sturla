@@ -28,7 +28,7 @@ python process_pd0.py inspect /percorso/dati/*.pd0 --max-mb 200
 2. **Tutto in un comando** (conversione + QC correnti + onde + grafici):
 
 ```bash
-python process_pd0.py all /percorso/dati/ -o out --hab 0.6 --metadata metadata.json
+python process_pd0.py all /percorso/dati/ -o out --metadata metadata.json
 ```
 
    oppure i singoli passi: `convert`, `deployment`, `currents`, `waves`, `plots`,
@@ -42,7 +42,7 @@ Parametri principali (`python process_pd0.py all -h` per l'elenco completo):
 | `--start`, `--end` | correzione manuale del periodo in posizione | automatico |
 | `--trim` | elimina i dati fuori posizione invece di marcarli (flag 4) | no |
 | `--redetect` | ricalcola il periodo in posizione | no |
-| `--hab` | altezza del sensore/trasduttore dal fondo [m] | 0.5 |
+| `--hab` | altezza del trasduttore (e del sensore di pressione) sul fondale [m] | 0.6 |
 | `--p-atm` | offset di pressione da sottrarre [dbar] (se il sensore non è stato azzerato in aria) | 0 |
 | `--declination` | declinazione magnetica [°] se **non** già impostata nello strumento (comando EB) | 0 |
 | `--corr-min`, `--pg-min`, `--err-max`, `--tilt-max` | soglie QC correnti | 64, 50 %, 0.2 m/s, 20° |
@@ -80,7 +80,7 @@ non utilizzabili. Per una prova preliminare conviene usare solo la parte central
 
 ```bash
 python process_pd0.py inspect sturla_20260707T125042.pd0 --range 45%:55%
-python process_pd0.py all sturla_20260707T125042.pd0 -o out_prova --range 45%:55% --puv-cell auto --hab 0.5
+python process_pd0.py all sturla_20260707T125042.pd0 -o out_prova --range 45%:55% --puv-cell auto
 ```
 
 `--range INIZIO:FINE` accetta percentuali (`25%:75%`) o MB (`300:3400`); un estremo vuoto
@@ -128,12 +128,12 @@ quindi `corr(w dai 4 beam, dη/dt)` alta e positiva conferma trasformazione e or
 verticale dice se quella velocità è utilizzabile. Tabella stampata dal passo `currents`,
 grafico in `figures/check_transform.png` (burst più energetico).
 
-`--hab` = altezza dal fondale del trasduttore/sensore di pressione (altezza del telaio).
+`--hab` = altezza dal fondale del trasduttore/sensore di pressione: a Sturla 0.6 m (valore predefinito).
 
 Comando consigliato:
 
 ```bash
-python process_pd0.py all sturla_20260707T125042.pd0 -o out --hab <altezza sul fondo> --puv-cell auto --metadata metadata.json
+python process_pd0.py all sturla_20260707T125042.pd0 -o out --puv-cell auto --metadata metadata.json
 ```
 
 ## Output (`out/`)
@@ -159,7 +159,7 @@ Copiare `metadata_template.json` in `metadata.json`, compilarlo (stazione, coord
 ente, licenza, altezza del telaio, fuso orario dell'orologio, ...) e lanciare:
 
 ```bash
-python process_pd0.py archive -o out --hab 0.5 --metadata metadata.json
+python process_pd0.py archive -o out --metadata metadata.json
 ```
 
 (il passo è incluso anche in `all`). In `out/archive/`:
