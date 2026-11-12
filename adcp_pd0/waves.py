@@ -19,6 +19,8 @@ from scipy import signal
 from .currents import RHO, G, _circmean_deg
 from .transform import to_earth, rotate_declination
 
+_trapz = getattr(np, "trapezoid", None) or np.trapz      # numpy >= 2 oppure versioni precedenti
+
 
 def wavenumber(f, h):
     """Numero d'onda k [rad/m] da dispersione lineare (Newton, vettoriale)."""
@@ -99,9 +101,9 @@ def _despike(x, nmad=4.0):
 
 def _moments(f, S, band):
     ff, SS = f[band], S[band]
-    m0 = np.trapezoid(SS, ff)
-    m1 = np.trapezoid(SS * ff, ff)
-    m2 = np.trapezoid(SS * ff**2, ff)
+    m0 = _trapz(SS, ff)
+    m1 = _trapz(SS * ff, ff)
+    m2 = _trapz(SS * ff**2, ff)
     ip = np.argmax(SS)
     # picco con interpolazione parabolica
     fp = ff[ip]
@@ -364,7 +366,7 @@ def wave_spectra(b: xr.Dataset, nperseg: int = 256, fmin: float = 0.04, fmax: fl
         ok_b = np.isfinite(S[k])
         if ok_b.sum() >= 3:
             tr = (2 * np.pi * freq[ok_b] / np.sinh(np.minimum(kk[ok_b] * h, 50.0))) ** 2
-            par["Ub"][k] = 2.0 * np.sqrt(np.trapezoid(S[k][ok_b] * tr, freq[ok_b]))
+            par["Ub"][k] = 2.0 * np.sqrt(_trapz(S[k][ok_b] * tr, freq[ok_b]))
         # direzione
         if nlev and bnd.sum() >= 3:
             refd = signal.detrend(ref)
