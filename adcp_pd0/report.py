@@ -1,40 +1,20 @@
-"""Rapporto di elaborazione (Markdown) generato a ogni esecuzione di ``archive``.
+"""Rapporto del pre-processing (Markdown), generato a ogni esecuzione.
 
-Descrive, con i valori effettivi del dataset, tutto ciò che è stato fatto ai dati: file di
-partenza, configurazione dello strumento, periodo in posizione, movimenti del telaio,
-trasformazioni, medie, controlli di qualità con le loro soglie, statistiche dei flag per
-causa, file prodotti e limiti noti.
+Descrive, con i valori effettivi del dataset, tutto ciò che è stato fatto ai dati grezzi per
+ottenere i file puliti L2: file di partenza, configurazione dello strumento, periodo in
+posizione, movimenti del telaio, trasformazioni, medie, controlli di qualità con le soglie,
+statistiche dei flag per causa, file prodotti e limiti noti.
 """
 from __future__ import annotations
 
-import json
 import os
-import subprocess
+import re
 
 import numpy as np
 import pandas as pd
 
-from .archive import (VEL_CAUSES, WAVE_CAUSES, DIR_CAUSES, TEMP_CAUSES, POS_CAUSES,
-                      CAUSE_DESCRIPTIONS, flag_stats)
-
-
-def _code_version() -> str:
-    here = os.path.dirname(os.path.abspath(__file__))
-    try:
-        h = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=here, capture_output=True,
-                           text=True, timeout=5).stdout.strip()
-        b = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=here, capture_output=True,
-                           text=True, timeout=5).stdout.strip()
-        return f"commit {h} (branch {b})" if h else "non disponibile"
-    except Exception:
-        return "non disponibile"
-
-
-def _load_json(path):
-    if os.path.exists(path):
-        with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
-    return None
+from .archive import (VEL_CAUSES, WAVE_CAUSES, TEMP_CAUSES, POS_CAUSES, CAUSE_DESCRIPTIONS, flag_stats,
+                      code_version)
 
 
 def _fmt(x, nd=2, unit=""):
@@ -63,29 +43,20 @@ def _flag_table(title, flag, cause, causes, unit_name):
     return L
 
 
-def write_report(outdir: str, md: dict, hab: float, base: str, c=None, wa=None, h=None,
-                 written=None, reader=None) -> str:
-    inv = _load_json(os.path.join(outdir, "inventory.json")) or {}
-    dep = _load_json(os.path.join(outdir, "deployment.json"))
-    chk = _load_json(os.path.join(outdir, "check_transform.json"))
+def write_report(path: str, did: str, md: dict, hab: float, inv: dict | None, dep: dict | None,
+                 chk: dict | None, c=None, b=None, h=None, files=None, reader=None,
+                 p_atm: float = 0.0) -> str:
+    inv = inv or {}
     stream = next((s for s in inv.get("streams", {}).values() if s.get("label") in ("waves", "currents")), {})
     sa = stream.get("attrs", {})
-    import xarray as xr
-
-    def _attrs(fn):
-        f = os.path.join(outdir, fn)
-        if not os.path.exists(f):
-            return {}
-        with xr.open_dataset(f) as d:
-            return dict(d.attrs)
-    qa = _attrs("currents_qc.nc")
-    wattrs = _attrs("waves_bulk.nc")
+    ca = dict(c.attrs) if c is not None else {}
+    ba = dict(b.attrs) if b is not None else {}
     now = pd.Timestamp.now(tz="UTC").strftime("%Y-%m-%d %H:%M UTC")
-    sid = md.get("station_id") or "ADCP"
-    L = [f"# Rapporto di elaborazione - {sid}", "",
-         f"Generato il {now} da `adcp_pd0` ({_code_version()}).", "",
-         "Questo documento descrive tutte le operazioni eseguite sui dati grezzi dell'ADCP per "
-         "produrre i file d'archivio, con le soglie usate e le statistiche dei controlli di qualita'.", ""]
+    L = [f"# Rapporto del pre-processing - {did}", "",
+         f"Generato il {now} da `adcp_pd0` ({code_version()}).", "",
+         "Descrive tutte le operazioni eseguite sui dati grezzi dell'ADCP per ottenere i file puliti "
+         "(livello L2), con le soglie usate e le statistiche dei controlli di qualita'. Le analisi "
+         "(spettri d'onda, termoclino, statistiche, grafici) sono nel post-processing.", ""]
 
     # 1. dati di partenza
     L += ["## 1. Dati di partenza", ""]
@@ -93,22 +64,23 @@ def write_report(outdir: str, md: dict, hab: float, base: str, c=None, wa=None, 
         L += [f"- File `{os.path.basename(f)}`: {st.get('bytes_scanned', 0) / 2**20:,.1f} MB analizzati, "
               f"{st.get('n_ensembles', 0):,} ensemble (ping) letti; checksum errate {st.get('bad_checksum', 0)}, "
               f"risincronizzazioni {st.get('n_resync', 0)}, byte non riconosciuti {st.get('bytes_skipped', 0):,}."]
+    hb = sa.get("heading_bias")
     L += ["", "Strumento e configurazione (dal fixed leader del formato PD0):", "",
           f"- Teledyne RDI Sentinel V, numero di serie {sa.get('serial', 'n.d.')}, firmware "
           f"{sa.get('fw_ver', '?')}.{sa.get('fw_rev', '?')}",
           f"- orientamento: {sa.get('orientation', 'n.d.')}; angolo dei beam {sa.get('beam_angle_deg', 'n.d.')} gradi; "
-          f"strumento sul fondo a {hab} m dal fondale (parametro `--hab`)",
-          f"- coordinate registrate: {sa.get('coord_system', 'n.d.')}; ping singoli "
-          f"(ping per ensemble {sa.get('pings_per_ens', 'n.d.')})",
-          f"- 4 beam inclinati: {sa.get('n_cells', 'n.d.')} celle da {sa.get('cell_size_cm', 'n.d.')} cm, "
+          f"trasduttore a {hab} m dal fondale (parametro `--hab` o metadati)",
+          f"- coordinate registrate: {sa.get('coord_system', 'n.d.')}; ping per ensemble "
+          f"{sa.get('pings_per_ens', 'n.d.')}",
+          f"- beam inclinati: {sa.get('n_cells', 'n.d.')} celle da {sa.get('cell_size_cm', 'n.d.')} cm, "
           f"blank {sa.get('blank_cm', 'n.d.')} cm, centro della prima cella a {sa.get('bin1_dist_cm', 'n.d.')} cm",
           f"- beam verticale: celle da {sa.get('vb_cell_size_cm', 'n.d.')} cm, prima cella a "
           f"{sa.get('vb_first_cell_cm', 'n.d.')} cm",
-          (f"- heading bias impostato nello strumento (comando EB): {int(sa['heading_bias']) / 100:.2f} gradi. "
+          (f"- heading bias impostato nello strumento (comando EB): {int(hb) / 100:.2f} gradi. "
            "Il Teledyne applica questa correzione all'heading registrato: di norma e' la declinazione "
            "magnetica, quindi le direzioni sono gia' riferite al Nord geografico e non va aggiunta altra "
            "declinazione (verificare con chi ha configurato lo strumento)."
-           if sa.get("heading_bias") not in (None, "", 0, "0") else
+           if hb not in (None, "", 0, "0") else
            "- heading bias (comando EB): 0, nessuna correzione nello strumento: la declinazione magnetica "
            "va applicata in elaborazione (`--declination`)"), ""]
     if reader is not None:
@@ -154,14 +126,13 @@ def write_report(outdir: str, md: dict, hab: float, base: str, c=None, wa=None, 
         L += ["Periodo in posizione non determinato.", ""]
     if reader is not None:
         try:
-            ds = reader.load(["pressure"])
-            p = ds.pressure.values
+            p = reader.load(["pressure"]).pressure.values
             air = p[p < 1.0]
             if air.size > 100:
                 L += [f"Pressione letta in aria (strumento fuori acqua): mediana {np.median(air):.2f} dbar "
                       f"(5-95%: {np.percentile(air, 5):.2f}-{np.percentile(air, 95):.2f}). E' l'offset del sensore "
                       f"rispetto alla pressione atmosferica; offset sottratto in elaborazione (`--p-atm`): "
-                      f"{wattrs.get('p_atm', 0)} dbar.", ""]
+                      f"{p_atm} dbar.", ""]
         except Exception:
             pass
 
@@ -169,10 +140,8 @@ def write_report(outdir: str, md: dict, hab: float, base: str, c=None, wa=None, 
     L += ["## 3. Correnti", ""]
     if c is not None:
         tm = sa.get("transformation_matrix")
-        tml = []
-        same = ""
+        tml, same = [], ""
         if tm is not None:
-            import re
             vals = [float(x) for x in re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", str(tm))]
             if len(vals) == 16:
                 tml = ["", "   | riga | beam 1 | beam 2 | beam 3 | beam 4 |", "   |---|---|---|---|---|"]
@@ -185,25 +154,30 @@ def write_report(outdir: str, md: dict, hab: float, base: str, c=None, wa=None, 
                 same = (f"; coincide con quella teorica RDI per beam a {sa.get('beam_angle_deg', 25)} gradi "
                         f"(differenza massima {dmax:.4f})" if dmax < 1e-3 else
                         f"; DIVERSA da quella teorica RDI (differenza massima {dmax:.4f})")
-        L += ["Passi, nell'ordine:", "",
-              "1. **Trasformazione beam -> strumento** con la matrice registrata dallo strumento "
-              f"(data type 0x3200{same}); solo soluzioni a 4 beam."]
-        L += tml
-        L += [
-              "2. **Strumento -> Est/Nord/Su** ping per ping con heading, pitch e roll del ping (convenzione "
-              "Teledyne RDI, pitch corretto per il roll, roll + 180 gradi per strumento rivolto verso l'alto).",
-              f"3. **Declinazione magnetica**: {qa.get('declination', 0)} gradi aggiunti in elaborazione "
+        binm = ca.get("proc_avg_bin_minutes")
+        if sa.get("coord_system") == "earth":
+            L += ["Passi, nell'ordine:", "",
+                  "1. Velocita' gia' registrate dallo strumento in coordinate Est/Nord/Su: nessuna trasformazione."]
+        else:
+            L += ["Passi, nell'ordine:", "",
+                  "1. **Trasformazione beam -> strumento** con la matrice registrata dallo strumento "
+                  f"(data type 0x3200{same}); solo soluzioni a 4 beam."]
+            L += tml
+            L += ["2. **Strumento -> Est/Nord/Su** ping per ping con heading, pitch e roll del ping (convenzione "
+                  "Teledyne RDI, pitch corretto per il roll, roll + 180 gradi per strumento rivolto verso l'alto)."]
+        L += [f"3. **Declinazione magnetica**: {ca.get('proc_declination', 0)} gradi aggiunti in elaborazione "
               f"(metadati: {md.get('magnetic_declination_deg', 'n.d.')}, gia' applicata nello strumento: "
               f"{md.get('magnetic_declination_applied', 'n.d.')}).",
-              f"4. **Scarto dei ping** con correlazione < {qa.get('avg_corr_min', 'n.d.')} counts su almeno un beam.",
-              f"5. **Media** "
-              + (f"su intervalli regolari di {qa['avg_bin_minutes']:g} minuti (ore di orologio), tempo al centro "
+              f"4. **Scarto dei ping** con correlazione < {ca.get('proc_avg_corr_min', ca.get('proc_qc_corr_min', 'n.d.'))} "
+              "counts su almeno un beam.",
+              "5. **Media** "
+              + (f"su intervalli regolari di {float(binm):g} minuti (ore di orologio), tempo al centro "
                  "dell'intervallo, usando solo i ping in posizione; intervalli senza misure come righe vuote."
-                 if qa.get("avg_bin_minutes") else "su ogni burst.")
-              + f" Celle con meno del {100 * float(qa.get('avg_min_good_frac', 0.5)):.0f}% di ping validi rimosse "
+                 if binm else "gia' fatta dallo strumento (ensemble) o su ogni burst.")
+              + f" Celle con meno del {100 * float(ca.get('proc_avg_min_good_frac', 0.5)):.0f}% di ping validi rimosse "
                 "(causa `pochi_ping_validi`), fra 50% e 80% sospette (`ping_validi_ridotti`).",
-              f"6. **Controlli sulle medie**: velocita' d'errore |err| > {qa.get('qc_err_max')} m/s "
-              f"(`velocita_errore_alta`); inclinazione > {qa.get('qc_tilt_max')} gradi (`inclinazione_eccessiva`); "
+              f"6. **Controlli sulle medie**: velocita' d'errore |err| > {ca.get('proc_qc_err_max')} m/s "
+              f"(`velocita_errore_alta`); inclinazione > {ca.get('proc_qc_tilt_max')} gradi (`inclinazione_eccessiva`); "
               "celle con distanza dal trasduttore > D cos(angolo beam) - 1 cella, con D profondita' del "
               "trasduttore dalla pressione (`contaminazione_superficie`).",
               f"7. Quota delle celle sul fondale = distanza dal trasduttore + {hab} m.", ""]
@@ -226,32 +200,40 @@ def write_report(outdir: str, md: dict, hab: float, base: str, c=None, wa=None, 
               f"- sfasamento temporale stimato dei 4 beam rispetto al beam verticale: "
               f"{_fmt(chk.get('lag_w4_s'), 2, 's')}.", ""]
 
-    # 4. onde
-    L += ["## 4. Onde", ""]
-    if wa is not None:
-        ok = wa.wave_qc.values == 1
-        hm = wa.Hm0.values
-        imax = int(np.nanargmax(np.where(ok, hm, np.nan))) if ok.any() else None
+    # 4. burst d'onda
+    L += ["## 4. Serie dei burst d'onda", ""]
+    if b is not None:
+        nmin = ba.get("proc_burst_min_samples", 256)
         L += ["Passi:", "",
-              f"1. Burst con almeno 256 ping ({wattrs.get('n_short_bursts_skipped', 'n.d.')} burst piu' corti "
-              "esclusi: servono solo per le correnti).",
+              f"1. Si tengono i burst con almeno {nmin} ping ({ba.get('proc_n_short_bursts_skipped', 'n.d.')} burst "
+              "piu' corti esclusi: servono solo per le correnti e la temperatura); i burst piu' lunghi di "
+              f"{ba.get('proc_burst_max_samples', 4096)} ping sarebbero divisi in tratti consecutivi.",
               "2. **Superficie dal beam verticale**: per ogni ping, massimo dell'eco nella finestra ±35% della "
-              "profondita' attesa, interpolazione parabolica fra le celle; ping senza un picco netto (bordo della "
-              "finestra o prominenza < 10 counts) scartati; spike oltre 4 MAD rimossi; buchi interpolati se < 15% "
-              "dei ping.",
-              f"3. **Spettro** di Welch (finestra di Hann, {wattrs.get('nperseg', 'n.d.')} campioni, 50% di "
-              f"sovrapposizione, fs {_fmt(wattrs.get('fs'))} Hz); parametri integrati fra {wattrs.get('fmin')} Hz e "
-              "1 Hz: Hm0 = 4√m0, Tp (picco con interpolazione parabolica), Tm01, Tm02.",
-              f"4. **Pressione** (solo confronto): spettro corretto con la teoria lineare, funzione di "
-              f"trasferimento fino a Kp² ≥ {wattrs.get('kp2_min')}; a questa profondita' vede solo le onde lunghe "
-              "e sottostima Hm0 (`Hm0_pressure`).",
-              f"5. **Direzione** (Dp al picco, Dm media) dai cross-spettri fra superficie e velocita' "
-              f"orizzontali Est/Nord di una cella (indice {wattrs.get('puv_cell', 'n.d.')}); direzione di "
-              "provenienza da Nord in senso orario. Direzione sospetta se Hm0 < 0.25 m (`bassa_energia`).",
-              f"6. Profondita' totale = pressione media del burst / (ρ g) + {hab} m (ρ = 1025 kg/m³).", ""]
-        if imax is not None:
-            L += [f"Risultato: {int(ok.sum()):,} burst con flag 1 su {wa.sizes['time']:,}; Hm0 massima "
-                  f"{hm[imax]:.2f} m il {str(wa.time.values[imax])[:16]} (Tp {float(wa.Tp.values[imax]):.1f} s).", ""]
+              "profondita' attesa, con interpolazione parabolica fra le celle; ping senza un picco netto (bordo "
+              "della finestra o prominenza < 10 counts) lasciati mancanti (`surface_range`).",
+              "3. **Elevazione pulita** (`eta`): valori oltre 4 MAD dalla mediana del burst rimossi, buchi "
+              "interpolati se < 15% dei ping, media del burst tolta; se i buchi sono di piu' l'elevazione del "
+              "burst resta mancante.",
+              f"4. **Pressione** per ping (offset sottratto: {ba.get('proc_p_atm', 0)} dbar).",
+              "5. **Velocita' Est/Nord** per ping ad alcune quote (stessa trasformazione delle correnti), "
+              "per la stima della direzione nel post-processing.",
+              "6. Nessuno spettro e nessun parametro d'onda in questa fase.", ""]
+        if "level_range" in b.coords:
+            L += ["Quote delle velocita': " + ", ".join(
+                f"{float(r):.2f} m dal trasduttore ({float(r) + hab:.2f} m dal fondale)"
+                for r in b["level_range"].values) + ".", ""]
+        ok = np.isin(b["burst_qc"].values, (1, 3))
+        txt = f"Risultato: {b.sizes['time']:,} burst, {int(ok.sum()):,} utilizzabili (flag 1 o 3)"
+        if "surface_found_frac" in b and ok.any():
+            sf = b["surface_found_frac"].values[ok]
+            txt += f"; superficie trovata nel {100 * np.nanmedian(sf):.0f}% dei ping (mediana)"
+            if "surface_range_mean" in b:
+                dr = np.nanmedian(b["surface_range_mean"].values[ok] - b["depth_sensor"].values[ok])
+                txt += (f"; distanza superficie meno profondita' da pressione = {dr:+.2f} m (atteso piccolo: "
+                        "distanza verticale fra sensore di pressione e trasduttore, piu' l'offset di pressione)")
+        L += [txt + ".", ""]
+    else:
+        L += ["Nessuno stream a burst trovato.", ""]
 
     # 5. temperatura
     L += ["## 5. Temperatura", ""]
@@ -270,9 +252,9 @@ def write_report(outdir: str, md: dict, hab: float, base: str, c=None, wa=None, 
     # 6. flag
     L += ["## 6. Flag di qualita'", "",
           "Schema IOOS/QARTOD per il flag principale: 1 buono, 3 sospetto, 4 cattivo, 9 mancante "
-          "(2 = non valutato non usato). Ogni flag ha accanto una variabile `*_cause` (NetCDF) o una colonna "
-          "`*_cause` (CSV) che dice **perche'**: e' la somma dei bit delle cause presenti; il flag principale e' il "
-          "piu' grave fra le cause. Le velocita' con flag 4 sono rimosse (NaN); quelle con flag 3 restano.", "",
+          "(2 = non valutato non usato). Ogni flag ha accanto una variabile `*_cause` che dice **perche'**: "
+          "e' la somma dei bit delle cause presenti; il flag principale e' il piu' grave fra le cause. "
+          "Le velocita' con flag 4 sono rimosse (mancanti); quelle con flag 3 restano.", "",
           "| causa | significato |", "|---|---|"]
     for k, v in CAUSE_DESCRIPTIONS.items():
         L.append(f"| `{k}` | {v} |")
@@ -282,42 +264,33 @@ def write_report(outdir: str, md: dict, hab: float, base: str, c=None, wa=None, 
                          c.vel_qc_cause.values, VEL_CAUSES, "celle x intervalli")
         L += _flag_table("Serie al fondo (temperatura, pressione, assetto) - `deployment_qc`",
                          c.deployment_qc.values, c.deployment_qc_cause.values, POS_CAUSES, "intervalli")
-    if wa is not None:
-        L += _flag_table("Parametri d'onda - `wave_qc`", wa.wave_qc.values, wa.wave_qc_cause.values,
+    if b is not None:
+        L += _flag_table("Burst d'onda - `burst_qc`", b.burst_qc.values, b.burst_qc_cause.values,
                          WAVE_CAUSES, "burst")
-        if "direction_qc" in wa:
-            L += _flag_table("Direzioni d'onda - `direction_qc`", wa.direction_qc.values,
-                             wa.direction_qc_cause.values, DIR_CAUSES, "burst")
     if h is not None:
         L += _flag_table("Temperatura oraria - `temperature_qc`", h.qc.values, h.qc_cause.values,
                          TEMP_CAUSES, "ore")
 
     # 7. file
     L += ["## 7. File prodotti", ""]
-    desc = {"_currents.nc": "profili di corrente (tempo x quota) e serie al fondo, NetCDF CF-1.8/ACDD-1.3",
-            "_timeseries.csv": "serie al fondo e corrente media sulla verticale",
-            "_currents_u.csv": "velocita' Est (righe tempo, colonne quota)",
-            "_currents_v.csv": "velocita' Nord", "_currents_speed.csv": "intensita'",
-            "_currents_direction.csv": "direzione (verso cui va)", "_currents_vel_qc.csv": "flag delle velocita'",
-            "_currents_vel_qc_cause.csv": "causa dei flag delle velocita' (bit)",
-            "_waves.nc": "parametri d'onda per burst e spettri, NetCDF", "_waves.csv": "parametri d'onda",
-            "_temperature_hourly.nc": "temperatura media oraria, NetCDF",
-            "_temperature_hourly.csv": "temperatura media oraria"}
-    for f in written or []:
+    desc = {"_L2_currents.nc": "profili di corrente (tempo x quota), flag e serie al fondo",
+            "_L2_temperature.nc": "temperatura al fondo, statistiche orarie",
+            "_L2_wave_bursts.nc": "serie pulite dei burst d'onda (elevazione, pressione, velocita')",
+            "deployment.json": "periodo in posizione, criteri e movimenti del telaio",
+            "inventory.json": "resoconto della lettura del file PD0 e configurazione dello strumento",
+            "check_transform.json": "risultati del controllo della trasformazione",
+            "metadata.json": "metadati usati", "LEGGIMI_DATI.md": "guida ai dati"}
+    for f in files or []:
         d = next((v for k, v in desc.items() if f.endswith(k)), "")
-        L.append(f"- `{os.path.basename(f)}`: {d}")
-    L += ["", "File intermedi in `out/`: `raw/` (tutti i ping decodificati), `currents_avg.nc`, `currents_qc.nc`, "
-          "`waves_bulk.nc`, `deployment.json`, `check_transform.json`, `inventory.json`, grafici in `figures/`.", ""]
+        L.append(f"- `{os.path.basename(f)}`" + (f": {d}" if d else ""))
+    L += ["", "Tutti i ping decodificati (livello L1) restano in `raw/`; i prodotti derivati (livello L3) e i "
+          "grafici sono in `postprocessing/`.", ""]
 
     # 8. limiti
     L += ["## 8. Limiti e avvertenze", "",
           f"- Fuso orario: {md.get('time_zone', 'non specificato: da verificare (orologio dello strumento)')}.",
-          "- Vicino alla superficie i 4 beam sono distanti fra loro (≈ 2 r tan 25°), confrontabile con la "
-          "lunghezza delle onde corte: la direzione delle onde e' una stima di primo livello.",
-          "- Hm0 dalla pressione sottostima in acqua profonda: il valore di riferimento e' quello dal beam "
-          "verticale.",
-          "- I dati sono controllati automaticamente, non validati manualmente.", ""]
-    path = base + "_RAPPORTO_ELABORAZIONE.md"
+          "- I dati sono controllati automaticamente, non validati manualmente.",
+          "- La pressione e' assunta relativa (azzerata in aria); l'offset letto in aria e' riportato sopra.", ""]
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(L))
     return path

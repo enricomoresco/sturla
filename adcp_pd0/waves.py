@@ -1,9 +1,14 @@
-"""Analisi onde per burst: spettro da pressione (con correzione di attenuazione),
-opzionalmente spettro da superficie misurata col beam verticale (stima tipo AST)
-e direzione con metodo PUV.
+"""Onde, in due passi.
 
-Fornisce una prima stima indipendente; per i prodotti direzionali completi usare il
-software Teledyne (Velocity) o librerie dedicate.
+PRE-PROCESSING  ``extract_wave_bursts``: dai ping di ogni burst lungo ricava le serie pulite
+  (superficie tracciata con l'eco del beam verticale, pressione, velocità Est/Nord ad alcune
+  quote). Nessuna analisi.
+POST-PROCESSING ``wave_spectra``: dalle serie pulite calcola spettri, Hm0, periodi, direzione
+  (cross-spettri superficie-velocità), velocità orbitale al fondo.
+
+La direzione è una stima di primo livello: vicino alla superficie i 4 beam distano fra loro
+quanto la lunghezza delle onde corte. Per i prodotti direzionali completi confrontare con il
+software Teledyne (Velocity).
 """
 from __future__ import annotations
 
@@ -11,8 +16,8 @@ import numpy as np
 import xarray as xr
 from scipy import signal
 
-from .currents import RHO, G
-from .transform import to_earth
+from .currents import RHO, G, _circmean_deg
+from .transform import to_earth, rotate_declination
 
 
 def wavenumber(f, h):
@@ -81,6 +86,8 @@ def surface_from_vb(echo, rng, depth_est, window=0.35, min_prominence=10.0):
 
 
 def _despike(x, nmad=4.0):
+    if not np.isfinite(x).any():
+        return x
     med = np.nanmedian(x)
     mad = np.nanmedian(np.abs(x - med)) * 1.4826
     if not np.isfinite(mad) or mad == 0:
@@ -107,61 +114,83 @@ def _moments(f, S, band):
                 Tm01=m0 / m1 if m1 > 0 else np.nan, Tm02=np.sqrt(m0 / m2) if m2 > 0 else np.nan)
 
 
-def analyze_waves(reader, hab: float = 0.6, p_atm: float = 0.0, nperseg: int = 256,
-                  fmin: float = 0.04, fmax: float = 0.6, kp2_min: float = 0.05,
-                  min_samples: int = 256, use_vb: bool = True, p_min: float = 1.0, puv_cell: int | None = None,
-                  orientation: str | None = None, declination: float = 0.0, dir_ref: str = "auto",
-                  max_samples_per_load: int = 2_000_000, verbose: bool = True) -> xr.Dataset:
-    """Statistiche d'onda per burst dallo stream onde.
+def choose_levels(rng_c, depth_s, beam_angle_deg=25.0, cell_size=0.5, fractions=(0.5, 0.7, 0.85)):
+    """Indici delle celle alle frazioni richieste della distanza trasduttore-superficie, sotto il
+    limite di contaminazione della superficie; senza duplicati."""
+    rng_c = np.asarray(rng_c, float)
+    rmax = depth_s * np.cos(np.deg2rad(beam_angle_deg)) - cell_size
+    ok = np.flatnonzero(rng_c <= rmax)
+    if len(ok) == 0:
+        ok = np.arange(len(rng_c))
+    cells = []
+    for fr in fractions:
+        i = int(ok[np.argmin(np.abs(rng_c[ok] - fr * depth_s))])
+        if i not in cells:
+            cells.append(i)
+    return sorted(cells)
 
-    hab        : altezza del sensore di pressione/trasduttore sul fondo [m]
-    p_atm      : offset da sottrarre alla pressione [dbar] (0 se il sensore è già azzerato in aria)
-    p_min      : burst con pressione media < p_min [dbar] considerati fuori acqua e scartati
-    kp2_min    : frequenza di taglio dove la funzione di trasferimento Kp^2 scende sotto questa soglia
-    puv_cell   : indice (0-based) della cella da usare per la direzione (None = no)
-    dir_ref    : riferimento per la direzione: "auto" (superficie dal beam verticale se c'è,
-                 altrimenti pressione), "vb" o "p"
+
+def extract_wave_bursts(reader, hab: float = 0.6, p_atm: float = 0.0, min_samples: int = 256,
+                        use_vb: bool = True, p_min: float = 1.0, fractions=(0.5, 0.7, 0.85),
+                        orientation: str | None = None, declination: float = 0.0, corr_min: int = 64,
+                        p_ref: float | None = None, max_samples: int = 4096,
+                        max_samples_per_load: int = 1_000_000, verbose: bool = True) -> xr.Dataset:
+    """Serie pulite dei burst d'onda (pre-processing), dimensioni ``time`` (inizio burst) x ``sample``.
+
+    Per ogni burst con almeno ``min_samples`` ping:
+      surface_range : distanza trasduttore-superficie dal massimo di eco del beam verticale (grezza)
+      eta           : elevazione pulita (spike oltre 4 MAD rimossi, buchi < 15% interpolati, media tolta)
+      pressure      : pressione (meno ``p_atm``)
+      u, v          : velocità Est/Nord alle quote ``fractions`` della distanza dalla superficie
+    I burst più corti (es. quelli da 180 ping per le sole correnti) sono esclusi; quelli più
+    lunghi di ``max_samples`` ping (es. campionamento continuo) sono divisi in tratti consecutivi
+    di ``max_samples`` ping, ognuno trattato come un burst.
     """
     t_all = reader.times()
-    bursts, dt_med = find_bursts(t_all)
-    # i burst troppo corti per uno spettro (es. i burst da 180 ping per le sole correnti
-    # del Sentinel V) vengono esclusi dall'analisi onde
+    bursts, dt = find_bursts(t_all)
+    if max_samples:
+        bursts = np.array([[s2, min(s2 + max_samples, e)] for s, e in bursts for s2 in range(s, e, max_samples)])
     lengths = bursts[:, 1] - bursts[:, 0]
     n_short = int((lengths < min_samples).sum())
     bursts = bursts[lengths >= min_samples]
-    if verbose and n_short:
-        print(f"  onde: {len(bursts)} burst usati, {n_short} burst piu' corti di {min_samples} "
-              f"ping esclusi")
     if len(bursts) == 0:
-        raise ValueError(f"nessun burst con almeno {min_samples} ping (min_samples)")
-    fs = 1.0 / dt_med
-    a = reader.attrs
-    nseg = int(min(nperseg, 2 ** np.floor(np.log2(max(min_samples, 16)))))
-    freq = np.fft.rfftfreq(nseg, 1 / fs)
-    vars_needed = ["pressure", "heading", "pitch", "roll"]
-    has_vb = use_vb and "vb_echo" in reader.variables()
-    if has_vb:
-        vars_needed.append("vb_echo")
-    if puv_cell is not None and "vel" in reader.variables():
-        r0 = reader.load(["pressure", "range"], t_all[0], t_all[min(len(t_all) - 1, 2000)])
-        rng_c = r0.range.values
-        if puv_cell == "auto":
-            # cella a ~70% della distanza dalla superficie: compromesso fra attenuazione
-            # delle velocità orbitali e separazione orizzontale dei beam
-            d_s = float(np.nanmean(r0.pressure.values) - p_atm) * 1e4 / (RHO * G)
-            puv_cell = int(np.argmin(np.abs(rng_c - 0.7 * d_s)))
-        puv_cell = int(puv_cell)
-        if not 0 <= puv_cell < len(rng_c):
-            raise ValueError(f"--puv-cell {puv_cell} fuori dall'intervallo 0..{len(rng_c) - 1}")
-        if verbose:
-            print(f"  direzione: cella {puv_cell} (a {rng_c[puv_cell]:.2f} m dal trasduttore)")
-        vars_needed.append("vel")
-
-    rows, S_p, S_v = [], [], []
-    # carica gruppi di burst consecutivi per contenere la memoria
+        raise ValueError(f"nessun burst con almeno {min_samples} ping")
+    if verbose:
+        print(f"  burst d'onda: {len(bursts)} con almeno {min_samples} ping"
+              + (f"; {n_short} piu' corti esclusi" if n_short else ""))
+    a = dict(reader.attrs)
+    variables = reader.variables()
+    has_vb = use_vb and "vb_echo" in variables
+    cells = []
+    if "vel" in variables:
+        if p_ref is None:
+            pw = reader.load(["pressure"]).pressure.values.astype(float) - p_atm
+            pw = pw[pw >= p_min]
+            p_ref = float(np.median(pw)) if pw.size else np.nan
+        d_ref = p_ref * 1e4 / (RHO * G) if p_ref is not None else np.nan
+        rng_c = reader.coord("range")
+        if np.isfinite(d_ref) and d_ref > 1.0:
+            cells = choose_levels(rng_c, d_ref, a.get("beam_angle_deg", 25), a.get("cell_size_cm", 100) / 100.0,
+                                  fractions)
+            if verbose:
+                print("  quote per la direzione: " + ", ".join(
+                    f"cella {c} a {rng_c[c]:.2f} m dal trasduttore" for c in cells))
+    nlev, nb = len(cells), len(bursts)
+    nmax = int((bursts[:, 1] - bursts[:, 0]).max())
+    nan2 = lambda *shape: np.full(shape, np.nan, np.float32)
+    P = nan2(nb, nmax)
+    SR, ETA = (nan2(nb, nmax), nan2(nb, nmax)) if has_vb else (None, None)
+    Uo, Vo = (nan2(nb, nmax, nlev), nan2(nb, nmax, nlev)) if nlev else (None, None)
+    nsam = np.zeros(nb, np.int32)
+    d_sens, found, sr_mean = (np.full(nb, np.nan) for _ in range(3))
+    head, pit, rol = (np.full(nb, np.nan) for _ in range(3))
+    corr_ok = np.full((nb, nlev), np.nan, np.float32)
+    names = ["pressure", "heading", "pitch", "roll"] + (["vb_echo"] if has_vb else []) \
+        + (["vel", "corr"] if nlev else [])
+    names = [v for v in names if v in variables or v == "pressure"]
     groups, cur, n_cur = [], [], 0
-    for b in bursts:
-        cur.append(b)
+    for k, b in enumerate(bursts):
+        cur.append((k, b))
         n_cur += b[1] - b[0]
         if n_cur >= max_samples_per_load:
             groups.append(cur)
@@ -169,113 +198,246 @@ def analyze_waves(reader, hab: float = 0.6, p_atm: float = 0.0, nperseg: int = 2
     if cur:
         groups.append(cur)
     for gi, grp in enumerate(groups):
-        t0 = t_all[grp[0][0]]
-        t1 = t_all[grp[-1][1] - 1] + np.timedelta64(1, "us")
-        isel = {"cell": [puv_cell]} if "vel" in vars_needed else None
-        ds = reader.load(vars_needed, t0, t1, isel=isel)
+        t0 = t_all[grp[0][1][0]]
+        t1 = t_all[grp[-1][1][1] - 1] + np.timedelta64(1, "us")
+        ds = reader.load(names, t0, t1, isel={"cell": cells} if nlev else None)
         tt = ds.time.values
-        for s, e in grp:
-            sel = (tt >= t_all[s]) & (tt <= t_all[e - 1])
-            n = int(sel.sum())
-            row = dict(time=t_all[s], n=n, duration_s=n * dt_med)
-            nanS = np.full(len(freq), np.nan)
+        vb_rng = ds.vb_range.values if has_vb else None
+        for k, (s, e) in grp:
+            i0 = int(np.searchsorted(tt, t_all[s], "left"))
+            i1 = int(np.searchsorted(tt, t_all[e - 1], "right"))
+            n = i1 - i0
+            nsam[k] = n
             if n < min_samples:
-                rows.append(row); S_p.append(nanS); S_v.append(nanS)
                 continue
-            p = ds.pressure.values[sel].astype(float) - p_atm
-            depth_s = float(np.nanmean(p)) * 1e4 / (RHO * G)   # profondità sensore [m]
-            h = depth_s + hab
-            row.update(depth=h, depth_sensor=depth_s, p_std=float(np.nanstd(p)))
-            out_of_water = float(np.nanmean(p)) < p_min
-            p = _interp_gaps(p)
-            if p is None or h <= 0.5 or out_of_water:
-                rows.append(row); S_p.append(nanS); S_v.append(nanS)
-                continue
-            eta_p = (p - p.mean()) * 1e4 / (RHO * G)   # in metri d'acqua
-            f, Spp = signal.welch(signal.detrend(eta_p), fs=fs, nperseg=nseg, window="hann",
-                                  noverlap=nseg // 2)
-            k = wavenumber(f, h)
-            Kp2 = (np.cosh(k * hab) / np.cosh(k * h)) ** 2
-            okf = (f >= fmin) & (f <= fmax) & (Kp2 >= kp2_min)
-            fcut = float(f[okf].max()) if okf.any() else np.nan
-            See = np.where(okf, Spp / np.maximum(Kp2, 1e-12), np.nan)
-            row["fcut"] = fcut
-            if okf.sum() >= 3:
-                for kk, vv in _moments(f, np.nan_to_num(See), okf).items():
-                    row[kk] = vv
-            S_p.append(See)
-            # superficie dal beam verticale
-            Sv = nanS
-            eta_vb = None
-            if has_vb:
-                rng = ds.vb_range.values
-                r = surface_from_vb(ds.vb_echo.values[sel], rng, np.full(n, depth_s))
-                row["surface_found_frac"] = float(np.isfinite(r).mean())
-                r = _interp_gaps(_despike(r), max_frac=0.15)
-                if r is not None:
-                    fv, Sv = signal.welch(signal.detrend(r), fs=fs, nperseg=nseg, window="hann",
-                                          noverlap=nseg // 2)
-                    bv = (fv >= fmin) & (fv <= min(fmax * 2, fs / 2))
-                    for kk, vv in _moments(fv, Sv, bv).items():
-                        row[kk + "_vb"] = vv
-                    row["surface_range_vb"] = float(np.mean(r))
-                    Sv = np.where(bv, Sv, np.nan)
-                    eta_vb = r - r.mean()
-            S_v.append(Sv)
-            # direzione: cross-spettri elevazione-velocità orizzontale (PUV / "SUV").
-            # Riferimento = superficie dal beam verticale se disponibile (non attenuata con la
-            # profondità), altrimenti la pressione.
-            if "vel" in ds:
-                if eta_vb is not None and dir_ref in ("auto", "vb"):
-                    ref, ref_name = eta_vb, "vb"
-                    Sref = np.nan_to_num(Sv)
-                    band = (f >= fmin) & (f <= fmax) & np.isfinite(Sv)
-                else:
-                    ref, ref_name = eta_p, "p"
-                    Sref = np.nan_to_num(See)
-                    band = okf
-                vel = ds.vel.values[sel]                    # (n, 1, beam)
-                ve = to_earth(vel, a, ds["heading"].values[sel], ds["pitch"].values[sel],
-                              ds["roll"].values[sel], orientation)[:, 0, :]
-                uu = _interp_gaps(ve[:, 0].astype(float))
-                vv_ = _interp_gaps(ve[:, 1].astype(float))
-                if uu is not None and vv_ is not None and band.sum() >= 3:
-                    if declination:
-                        ang = np.deg2rad(declination)
-                        uu, vv_ = uu * np.cos(ang) + vv_ * np.sin(ang), -uu * np.sin(ang) + vv_ * np.cos(ang)
-                    kw = dict(fs=fs, nperseg=nseg, window="hann", noverlap=nseg // 2)
-                    _, Cpu = signal.csd(signal.detrend(ref), signal.detrend(uu), **kw)
-                    _, Cpv = signal.csd(signal.detrend(ref), signal.detrend(vv_), **kw)
-                    Cpu, Cpv = Cpu.real, Cpv.real
-                    ip = int(np.argmax(np.where(band, Sref, -np.inf)))
-                    to_p = np.degrees(np.arctan2(Cpv[ip], Cpu[ip]))
-                    to_m = np.degrees(np.arctan2(np.sum(Cpv[band]), np.sum(Cpu[band])))
-                    row["Dp"] = (270.0 - to_p) % 360.0   # direzione di provenienza, da Nord orario
-                    row["Dm"] = (270.0 - to_m) % 360.0
-                    row["dir_ref_vb"] = 1.0 if ref_name == "vb" else 0.0
-            rows.append(row)
+            sl = slice(i0, i1)
+            p = ds.pressure.values[sl].astype(float) - p_atm
+            P[k, :n] = p
+            d_s = float(np.nanmean(p)) * 1e4 / (RHO * G)
+            d_sens[k] = d_s
+            hh, pp, rr = (ds[v].values[sl] for v in ("heading", "pitch", "roll"))
+            head[k], pit[k], rol[k] = _circmean_deg(hh), np.nanmean(pp), np.nanmean(rr)
+            if has_vb and d_s > 0.5:
+                r = surface_from_vb(ds.vb_echo.values[sl], vb_rng, np.full(n, d_s))
+                SR[k, :n] = r
+                found[k] = float(np.isfinite(r).mean())
+                rc = _interp_gaps(_despike(r), max_frac=0.15)
+                if rc is not None:
+                    sr_mean[k] = float(np.mean(rc))
+                    ETA[k, :n] = rc - np.mean(rc)
+            if nlev:
+                ve = to_earth(ds.vel.values[sl], a, hh, pp, rr, orientation)
+                uu, vv = rotate_declination(ve[..., 0], ve[..., 1], declination)
+                Uo[k, :n, :], Vo[k, :n, :] = uu, vv
+                if "corr" in ds:
+                    corr_ok[k] = (ds.corr.values[sl].min(axis=-1) >= corr_min).mean(axis=0)
         if verbose:
-            print(f"  onde: gruppo {gi + 1}/{len(groups)} ({len(rows)} burst)", flush=True)
+            print(f"  burst d'onda: gruppo {gi + 1}/{len(groups)}", flush=True)
 
-    keys = ["n", "duration_s", "depth", "depth_sensor", "p_std", "fcut", "Hm0", "Tp", "Tm01", "Tm02",
-            "Hm0_vb", "Tp_vb", "Tm01_vb", "Tm02_vb", "surface_range_vb", "surface_found_frac", "Dp", "Dm", "dir_ref_vb"]
-    keys = [k for k in keys if any(k in r for r in rows)]
-    data = {k: ("time", np.array([r.get(k, np.nan) for r in rows], float)) for k in keys}
-    units = dict(depth="m", depth_sensor="m", p_std="dbar", fcut="Hz", Hm0="m", Tp="s", Tm01="s",
-                 Tm02="s", Hm0_vb="m", Tp_vb="s", Tm01_vb="s", Tm02_vb="s", surface_range_vb="m",
-                 Dp="degree", Dm="degree", duration_s="s")
-    out = xr.Dataset(data, coords=dict(time=np.array([r["time"] for r in rows]), freq=freq))
-    for k in keys:
-        if k in units:
-            out[k].attrs["units"] = units[k]
-    out["S_p"] = (("time", "freq"), np.array(S_p), dict(units="m2 Hz-1",
-                  long_name="spettro elevazione da pressione (corretto per attenuazione)"))
+    out = xr.Dataset(coords=dict(
+        time=("time", t_all[bursts[:, 0]]),
+        sample=("sample", np.arange(nmax, dtype=np.int32)),
+        sample_time=("sample", (np.arange(nmax) * dt).astype(np.float32))))
+    out["pressure"] = (("time", "sample"), P)
     if has_vb:
-        out["S_vb"] = (("time", "freq"), np.array(S_v), dict(units="m2 Hz-1",
-                       long_name="spettro elevazione da superficie (beam verticale)"))
-    out.attrs.update({k: v for k, v in a.items() if k in ("serial", "fw_ver", "fw_rev", "source_file",
-                                                          "orientation", "beam_angle_deg")})
-    out.attrs.update(dict(n_short_bursts_skipped=n_short, fs=fs, hab=hab, p_atm=p_atm, nperseg=nseg, fmin=fmin, fmax=fmax,
-                          kp2_min=kp2_min, puv_cell=-1 if puv_cell is None else puv_cell,
-                          note="Dp/Dm: direzione di PROVENIENZA, gradi da Nord in senso orario"))
+        out["surface_range"] = (("time", "sample"), SR)
+        out["eta"] = (("time", "sample"), ETA)
+        out["surface_found_frac"] = ("time", found.astype(np.float32))
+        out["surface_range_mean"] = ("time", sr_mean.astype(np.float32))
+    if nlev:
+        rng_c = reader.coord("range")
+        out = out.assign_coords(level=("level", np.arange(nlev, dtype=np.int32)),
+                                level_range=("level", rng_c[cells].astype(np.float32)),
+                                level_cell=("level", np.asarray(cells, np.int32)))
+        out["u"] = (("time", "sample", "level"), Uo)
+        out["v"] = (("time", "sample", "level"), Vo)
+        out["corr_ok_frac"] = (("time", "level"), corr_ok)
+    out["n_samples"] = ("time", nsam)
+    out["depth_sensor"] = ("time", d_sens.astype(np.float32))
+    out["water_depth"] = ("time", (d_sens + hab).astype(np.float32))
+    out["heading"] = ("time", head.astype(np.float32))
+    out["pitch"] = ("time", pit.astype(np.float32))
+    out["roll"] = ("time", rol.astype(np.float32))
+    out.attrs.update({k: v for k, v in a.items() if k in (
+        "serial", "fw_ver", "fw_rev", "source_file", "orientation", "beam_angle_deg", "coord_system",
+        "n_cells", "cell_size_cm", "bin1_dist_cm", "blank_cm", "heading_bias", "convex")})
+    out.attrs.update(dict(n_short_bursts_skipped=n_short, dt=float(dt), fs=float(1.0 / dt), hab=float(hab),
+                          p_atm=float(p_atm), burst_min_samples=int(min_samples), declination=float(declination),
+                          burst_p_ref_dbar=float(p_ref) if p_ref is not None and np.isfinite(p_ref) else -1.0,
+                          burst_corr_min=int(corr_min), burst_max_samples=int(max_samples or 0),
+                          has_vertical_beam=int(has_vb)))
+    return out
+
+
+def _burst_dt(b) -> float:
+    st = b["sample_time"].values
+    return float(st[1] - st[0]) if len(st) > 1 else float(b.attrs.get("dt", 0.5))
+
+
+def wave_spectra(b: xr.Dataset, nperseg: int = 256, fmin: float = 0.04, fmax: float = 0.6,
+                 kp2_min: float = 0.05, hm0_dir_min: float = 0.25, coh_min: float = 0.3,
+                 main_fraction: float = 0.7, hab: float | None = None) -> xr.Dataset:
+    """Spettri e parametri d'onda per burst (post-processing) dalle serie pulite ``b``.
+
+    - spettro di Welch dell'elevazione (finestra di Hann, 50% di sovrapposizione);
+      Hm0 = 4 sqrt(m0), Tp (picco con interpolazione parabolica), Tm01, Tm02 fra ``fmin`` e
+      min(2 fmax, Nyquist);
+    - se manca il beam verticale: spettro da pressione corretto con la teoria lineare fino a
+      Kp^2 >= ``kp2_min``; con il beam verticale la pressione è solo un confronto;
+    - direzione di PROVENIENZA (gradi da Nord, orario) dai cross-spettri elevazione-velocità
+      a ogni quota: Dp al picco, Dm sulla banda, e direzione per frequenza alla quota principale;
+    - coerenza elevazione-velocità al picco (qualità della direzione);
+    - Ub: ampiezza significativa della velocità orbitale al fondo dalla teoria lineare
+      (2 volte la deviazione standard).
+    """
+    from .archive import combine_flags, WAVE_CAUSES, DIR_CAUSES
+
+    dt = _burst_dt(b)
+    fs = 1.0 / dt
+    nb = b.sizes["time"]
+    n_s = b["n_samples"].values.astype(int)
+    if hab is None:
+        hab = float(b.attrs.get("instrument_height_above_bed_m", b.attrs.get("hab", 0.6)))
+    has_eta = "eta" in b
+    nlev = b.sizes.get("level", 0) if "u" in b else 0
+    usable = np.isin(b["burst_qc"].values, (1, 3)) if "burst_qc" in b else np.ones(nb, bool)
+    n_ok = n_s[usable & (n_s > 0)]
+    nseg = int(min(nperseg, 2 ** np.floor(np.log2(max(n_ok.min() if n_ok.size else nperseg, 16)))))
+    freq = np.fft.rfftfreq(nseg, dt)
+    nf = len(freq)
+    kw = dict(fs=fs, nperseg=nseg, noverlap=nseg // 2, window="hann")
+    band_m = (freq >= fmin) & (freq <= min(2 * fmax, fs / 2))      # banda dei momenti (elevazione)
+    band_d = (freq >= fmin) & (freq <= fmax)                       # banda della direzione
+    lev_main = 0
+    if nlev:
+        d_ref = float(np.nanmedian(b["depth_sensor"].values[usable])) if usable.any() else np.nan
+        frac = b["level_range"].values / d_ref if np.isfinite(d_ref) and d_ref > 0 else np.zeros(nlev)
+        lev_main = int(np.argmin(np.abs(frac - main_fraction)))
+
+    nanv = lambda *shape: np.full(shape, np.nan)
+    S, Sp, TH = nanv(nb, nf), nanv(nb, nf), nanv(nb, nf)
+    par = {k: nanv(nb) for k in ("Hm0", "Tp", "Tm01", "Tm02", "Hm0_pressure", "Tp_pressure", "fcut_pressure",
+                                 "Ub", "Dp", "Dm", "dir_coherence", "dir_level_spread")}
+    Dpl, Dml = nanv(nb, max(nlev, 1)), nanv(nb, max(nlev, 1))
+    P = b["pressure"].values
+    E = b["eta"].values if has_eta else None
+    U = b["u"].values if nlev else None
+    V = b["v"].values if nlev else None
+    depth = b["water_depth"].values
+    for k in range(nb):
+        n = int(n_s[k])
+        h = float(depth[k])
+        if not usable[k] or n < nseg or not np.isfinite(h) or h <= 0.5:
+            continue
+        kk = wavenumber(freq, h)
+        ref = Sref = None
+        # pressione -> elevazione con la teoria lineare
+        pc = _interp_gaps(P[k, :n].astype(float))
+        if pc is not None:
+            eta_p = (pc - pc.mean()) * 1e4 / (RHO * G)
+            _, Spp = signal.welch(signal.detrend(eta_p), **kw)
+            Kp2 = (np.cosh(kk * hab) / np.cosh(kk * h)) ** 2
+            okf = band_d & (Kp2 >= kp2_min)
+            if okf.sum() >= 3:
+                See = np.where(okf, Spp / np.maximum(Kp2, 1e-12), np.nan)
+                Sp[k] = See
+                mp = _moments(freq, np.nan_to_num(See), okf)
+                par["Hm0_pressure"][k], par["Tp_pressure"][k] = mp["Hm0"], mp["Tp"]
+                par["fcut_pressure"][k] = float(freq[okf].max())
+                if not has_eta:
+                    S[k] = See
+                    for q in ("Hm0", "Tp", "Tm01", "Tm02"):
+                        par[q][k] = mp[q]
+                    ref, Sref, bnd = eta_p, np.nan_to_num(See), okf
+        # superficie dal beam verticale
+        if has_eta:
+            e = E[k, :n].astype(float)
+            if np.isfinite(e).all():
+                _, Sv = signal.welch(signal.detrend(e), **kw)
+                S[k] = np.where(band_m, Sv, np.nan)
+                for q, val in _moments(freq, Sv, band_m).items():
+                    par[q][k] = val
+                ref, Sref, bnd = e, Sv, band_d
+        if ref is None:
+            continue
+        # velocità orbitale al fondo (teoria lineare)
+        ok_b = np.isfinite(S[k])
+        if ok_b.sum() >= 3:
+            tr = (2 * np.pi * freq[ok_b] / np.sinh(np.minimum(kk[ok_b] * h, 50.0))) ** 2
+            par["Ub"][k] = 2.0 * np.sqrt(np.trapezoid(S[k][ok_b] * tr, freq[ok_b]))
+        # direzione
+        if nlev and bnd.sum() >= 3:
+            refd = signal.detrend(ref)
+            _, Pxx = signal.welch(refd, **kw)
+            ip = int(np.argmax(np.where(bnd, Sref, -np.inf)))
+            for l in range(nlev):
+                uu = _interp_gaps(U[k, :n, l].astype(float), max_frac=0.3)
+                vv = _interp_gaps(V[k, :n, l].astype(float), max_frac=0.3)
+                if uu is None or vv is None:
+                    continue
+                ud, vd = signal.detrend(uu), signal.detrend(vv)
+                _, Pxu = signal.csd(refd, ud, **kw)
+                _, Pxv = signal.csd(refd, vd, **kw)
+                Dpl[k, l] = (270.0 - np.degrees(np.arctan2(Pxv.real[ip], Pxu.real[ip]))) % 360.0
+                Dml[k, l] = (270.0 - np.degrees(np.arctan2(Pxv.real[bnd].sum(), Pxu.real[bnd].sum()))) % 360.0
+                if l == lev_main:
+                    TH[k] = np.where(bnd, (270.0 - np.degrees(np.arctan2(Pxv.real, Pxu.real))) % 360.0, np.nan)
+                    _, Puu = signal.welch(ud, **kw)
+                    _, Pvv = signal.welch(vd, **kw)
+                    with np.errstate(all="ignore"):
+                        coh = (np.abs(Pxu) ** 2 + np.abs(Pxv) ** 2) / (Pxx * (Puu + Pvv))
+                    pk = bnd & (np.abs(freq - freq[ip]) <= 0.025)
+                    if pk.any() and np.sum(Pxx[pk]) > 0:
+                        par["dir_coherence"][k] = float(np.sum(coh[pk] * Pxx[pk]) / np.sum(Pxx[pk]))
+            par["Dp"][k], par["Dm"][k] = Dpl[k, lev_main], Dml[k, lev_main]
+            fin = np.isfinite(Dpl[k, :nlev])
+            if fin.sum() >= 2:
+                d = np.deg2rad(Dpl[k, :nlev][fin])
+                diff = np.abs((np.degrees(d[:, None] - d[None, :]) + 180) % 360 - 180)
+                par["dir_level_spread"][k] = float(diff.max())
+
+    out = xr.Dataset(coords=dict(time=("time", b.time.values), frequency=("frequency", freq.astype(np.float32))))
+    for q in ("Hm0", "Tp", "Tm01", "Tm02", "Ub"):
+        out[q] = ("time", par[q].astype(np.float32))
+    out["S"] = (("time", "frequency"), S.astype(np.float32))
+    if has_eta:
+        out["Hm0_pressure"] = ("time", par["Hm0_pressure"].astype(np.float32))
+        out["fcut_pressure"] = ("time", par["fcut_pressure"].astype(np.float32))
+        out["S_pressure"] = (("time", "frequency"), Sp.astype(np.float32))
+    if nlev:
+        out = out.assign_coords(level=("level", b["level"].values), level_range=("level", b["level_range"].values))
+        for q in ("Dp", "Dm", "dir_coherence", "dir_level_spread"):
+            out[q] = ("time", par[q].astype(np.float32))
+        out["Dp_level"] = (("time", "level"), Dpl[:, :nlev].astype(np.float32))
+        out["Dm_level"] = (("time", "level"), Dml[:, :nlev].astype(np.float32))
+        out["direction_f"] = (("time", "frequency"), TH.astype(np.float32))
+    for q in ("water_depth", "n_samples", "surface_found_frac"):
+        if q in b:
+            out[q] = ("time", b[q].values)
+    # flag con causa
+    inpos = b["in_position"].values.astype(bool) if "in_position" in b else np.ones(nb, bool)
+    mot = b["platform_motion"].values.astype(bool) if "platform_motion" in b else np.zeros(nb, bool)
+    sf = b["surface_found_frac"].values if "surface_found_frac" in b else np.ones(nb)
+    hm = par["Hm0"]
+    flag, cause = combine_flags((nb,), {
+        "fuori_posizione": ~inpos, "movimento_telaio": mot & inpos,
+        "superficie_trovata_parzialmente": inpos & np.isfinite(hm) & (np.nan_to_num(sf, nan=1.0) < 0.9),
+        "nessun_dato": inpos & ~np.isfinite(hm)}, WAVE_CAUSES)
+    out["wave_qc"], out["wave_qc_cause"] = ("time", flag), ("time", cause)
+    out["in_position"] = ("time", inpos.astype(np.int8))
+    out["platform_motion"] = ("time", mot.astype(np.int8))
+    if nlev:
+        dok = np.isfinite(par["Dp"])
+        dflag, dcause = combine_flags((nb,), {
+            "fuori_posizione": ~inpos, "movimento_telaio": mot & inpos,
+            "bassa_energia": inpos & dok & (np.nan_to_num(hm) < hm0_dir_min),
+            "bassa_coerenza": inpos & dok & (np.nan_to_num(par["dir_coherence"], nan=1.0) < coh_min),
+            "nessun_dato": inpos & ~dok}, DIR_CAUSES)
+        out["direction_qc"], out["direction_qc_cause"] = ("time", dflag), ("time", dcause)
+    out.attrs.update(dict(
+        wave_method=("superficie tracciata con l'eco del beam verticale" if has_eta else
+                     "pressione corretta con la teoria lineare"),
+        nperseg=int(nseg), fs=float(fs), fmin=float(fmin), fmax=float(fmax), kp2_min=float(kp2_min),
+        hm0_dir_min=float(hm0_dir_min), coh_min=float(coh_min), hab=float(hab),
+        direction_main_level=int(lev_main)))
     return out

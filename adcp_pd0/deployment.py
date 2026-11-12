@@ -132,7 +132,8 @@ def motion_overlap(t0, t1, dep: dict) -> np.ndarray:
     return out
 
 
-def get_deployment(outdir: str, reader=None, start=None, end=None, redetect=False, **kw) -> dict:
+def get_deployment(outdir: str, reader=None, start=None, end=None, redetect=False, fig_path=None,
+                   **kw) -> dict:
     """Legge ``outdir/deployment.json`` o lo crea; ``start``/``end`` sovrascrivono il risultato."""
     path = os.path.join(outdir, "deployment.json")
     dep = None
@@ -147,7 +148,7 @@ def get_deployment(outdir: str, reader=None, start=None, end=None, redetect=Fals
         dep = detect_deployment(reader, **kw)
         ms = dep.pop("_minute_series")
         try:
-            _plot_deployment(ms, dep, os.path.join(outdir, "figures", "deployment.png"))
+            _plot_deployment(ms, dep, fig_path or os.path.join(outdir, "figures", "deployment.png"))
         except Exception as e:  # il grafico non deve bloccare l'elaborazione
             print(f"  (grafico deployment non prodotto: {e})")
         with open(path, "w", encoding="utf-8") as fh:

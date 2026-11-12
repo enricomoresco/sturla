@@ -34,7 +34,8 @@ def _coh_phase(x, y, fs, nseg=128):
     f, Pxy = signal.csd(signal.detrend(x), signal.detrend(y), **kw)
     _, Pxx = signal.welch(signal.detrend(x), **kw)
     _, Pyy = signal.welch(signal.detrend(y), **kw)
-    coh = np.abs(Pxy) ** 2 / (Pxx * Pyy)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        coh = np.abs(Pxy) ** 2 / (Pxx * Pyy)
     return f, coh, np.degrees(np.angle(Pxy)), Pxx, Pyy
 
 
@@ -106,6 +107,11 @@ def burst_check(ds, attrs, sel=None, orientation=None, frac=0.7, corr_min=64, fs
             out["cp_uh"] = (cu[0], num / (cu[3] + cv[3]), cu[2], cu[3] + cv[3], cu[4])
             out["coh_uh"], _ = _band_stats(out["cp_uh"], band)
     return out
+
+
+def _nanmedian(a) -> float:
+    a = np.asarray(a, float)
+    return float(np.nanmedian(a)) if np.isfinite(a).any() else float("nan")
 
 
 def plot_burst_check(res, t, path, title=""):
@@ -209,11 +215,11 @@ def check_transform(reader, out_dir=None, n_bursts=10, min_pings=256, orientatio
         def circ_med(a):
             a = np.deg2rad([x for x in a if np.isfinite(x)])
             return float(np.degrees(np.angle(np.mean(np.exp(1j * a))))) if len(a) else np.nan
-        c4 = np.nanmedian([r.get("coh_w4", np.nan) for r in rows])
+        c4 = _nanmedian([r.get("coh_w4", np.nan) for r in rows])
         p4 = circ_med([r.get("ph_w4", np.nan) for r in rows])
-        cv = np.nanmedian([r.get("coh_vb", np.nan) for r in rows])
+        cv = _nanmedian([r.get("coh_vb", np.nan) for r in rows])
         pv = circ_med([r.get("ph_vb", np.nan) for r in rows])
-        ch = np.nanmedian([r.get("coh_uh", np.nan) for r in rows])
+        ch = _nanmedian([r.get("coh_uh", np.nan) for r in rows])
         print(f"  al picco (mediana): coh²(w 4 beam, dη/dt) = {c4:.2f}, fase {p4:+.0f} gradi -> "
               + ("trasformazione/orientamento OK (in fase)" if c4 > 0.3 and abs(p4) < 45 else
                  "SEGNO OPPOSTO: orientamento/segno da verificare" if c4 > 0.3 and abs(p4) > 135 else
@@ -238,7 +244,7 @@ def check_transform(reader, out_dir=None, n_bursts=10, min_pings=256, orientatio
         def cm(a):
             a = np.deg2rad([x for x in a if np.isfinite(x)])
             return float(np.degrees(np.angle(np.mean(np.exp(1j * a))))) if len(a) else None
-        med = lambda k: float(np.nanmedian([r.get(k, np.nan) for r in rows]))
+        med = lambda k: _nanmedian([r.get(k, np.nan) for r in rows])
         lags = [r["ph_w4"] / (360.0 * r["fp"]) for r in rows
                 if np.isfinite(r.get("ph_w4", np.nan)) and r.get("coh_w4", 0) > 0.3]
         summ = dict(n_bursts=len(rows), bursts=[str(r["time"])[:16] for r in rows],

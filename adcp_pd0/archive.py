@@ -1,14 +1,11 @@
-"""Prodotti d'archivio: NetCDF CF-1.8 (+ ACDD) e CSV, a partire dai risultati di
-``currents`` (currents_qc.nc) e ``waves`` (waves_bulk.nc).
+"""Prodotti NetCDF (CF-1.8 + ACDD-1.3) e flag di qualità.
 
-File prodotti in ``<out>/archive/``:
-  <ID>_<inizio>_<fine>_currents.nc   profili di corrente + serie al fondo (temperatura, pressione, ...)
-  <ID>_<inizio>_<fine>_waves.nc      parametri d'onda per burst + spettri
-  <ID>_..._timeseries.csv            serie al fondo + corrente media sulla verticale
-  <ID>_..._waves.csv                 parametri d'onda
-  <ID>_..._currents_<var>.csv        matrici tempo x quota (u, v, speed, direction)
+Livelli: L2 = dati puliti del pre-processing (correnti orarie, temperatura oraria, serie dei
+burst d'onda); L3 = prodotti derivati del post-processing (parametri e spettri d'onda,
+termoclino). ID del deployment = <stazione>_<inizio>_<fine> del periodo in posizione.
 
-Flag di qualità (schema IOOS/QARTOD): 1 buono, 2 non valutato, 3 sospetto, 4 cattivo, 9 mancante.
+Flag di qualità (schema IOOS/QARTOD): 1 buono, 2 non valutato, 3 sospetto, 4 cattivo, 9 mancante;
+accanto a ogni flag una variabile ``*_cause`` (somma di bit) dice il motivo.
 """
 from __future__ import annotations
 
@@ -38,7 +35,7 @@ VEL_CAUSES = [  # (bit, nome, flag)
 WAVE_CAUSES = [(1, "fuori_posizione", 4), (2, "movimento_telaio", 3), (4, "superficie_trovata_parzialmente", 3),
                (8, "nessun_dato", 9)]
 DIR_CAUSES = [(1, "fuori_posizione", 4), (2, "movimento_telaio", 3), (4, "bassa_energia", 3),
-              (8, "nessun_dato", 9)]
+              (8, "nessun_dato", 9), (16, "bassa_coerenza", 3)]
 TEMP_CAUSES = [(1, "fuori_posizione", 4), (2, "pochi_campioni", 3), (4, "nessun_dato", 9)]
 POS_CAUSES = [(1, "fuori_posizione", 4), (2, "nessun_dato", 9)]
 CAUSE_DESCRIPTIONS = {
@@ -55,6 +52,7 @@ CAUSE_DESCRIPTIONS = {
     "valore_mancante": "valore non disponibile senza una causa specifica",
     "superficie_trovata_parzialmente": "superficie trovata in meno del 90% dei ping del burst: dato sospetto",
     "bassa_energia": "Hm0 sotto la soglia: direzione poco affidabile, dato sospetto",
+    "bassa_coerenza": "superficie e velocita' poco coerenti al picco dello spettro: direzione sospetta",
     "pochi_campioni": "meno di 30 s di misure nell'ora: dato sospetto",
 }
 
@@ -102,16 +100,84 @@ def load_metadata(path: str | None) -> dict:
     return md
 
 
-def _global_attrs(md: dict, ds_src: xr.Dataset, kind: str, t: np.ndarray) -> dict:
+def code_version() -> str:
+    """Versione del codice (commit git), se disponibile."""
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        h = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=here, capture_output=True,
+                           text=True, timeout=5).stdout.strip()
+        b = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=here, capture_output=True,
+                           text=True, timeout=5).stdout.strip()
+        return f"commit {h} (branch {b})" if h else "non disponibile"
+    except Exception:
+        return "non disponibile"
+
+
+def deployment_id(md: dict, dep: dict | None = None, t=None) -> str:
+    """ID unico del deployment: ``deployment_id`` dei metadati, altrimenti
+    <stazione>_<inizio>_<fine> del periodo in posizione (o dei dati, se non determinato)."""
+    if md.get("deployment_id"):
+        return str(md["deployment_id"]).replace(" ", "_")
+    sid = str(md.get("station_id") or "ADCP").replace(" ", "_")
+    if dep:
+        a, b = pd.Timestamp(dep["start"]), pd.Timestamp(dep["end"])
+    else:
+        a, b = pd.Timestamp(np.min(t)), pd.Timestamp(np.max(t))
+    return f"{sid}_{a:%Y%m%d}_{b:%Y%m%d}"
+
+
+KIND_INFO = {   # tipo di prodotto -> (featureType CF, descrizione)
+    "currents": ("timeSeriesProfile", "Profili di corrente in coordinate Est/Nord/Su mediati nel tempo, con "
+                 "flag di qualita' e causa; serie al fondo di temperatura, pressione e assetto dello strumento"),
+    "temperature": ("timeSeries", "Temperatura dell'acqua al fondo: statistiche orarie di tutte le misure "
+                    "del sensore dello strumento"),
+    "wave_bursts": (None, "Serie pulite dei burst d'onda: elevazione della superficie dal beam verticale, "
+                    "pressione, velocita' Est/Nord ad alcune quote; flag per burst"),
+    "waves": ("timeSeries", "Parametri e spettri d'onda per burst: Hm0, periodi, direzione dai cross-spettri "
+              "superficie-velocita', velocita' orbitale al fondo"),
+    "thermocline": ("timeSeries", "Stima della quota del termoclino dal taglio verticale della corrente e "
+                    "dal picco dell'eco (prodotto derivato, non validato con profili di temperatura)"),
+}
+
+
+def instrument_attrs(src: dict) -> dict:
+    """Configurazione dello strumento (dal fixed leader) come attributi globali."""
+    out = {}
+    for k, name, scale in (("beam_angle_deg", "instrument_beam_angle_deg", 1), ("n_cells", "instrument_n_cells", 1),
+                           ("cell_size_cm", "instrument_cell_size_m", 0.01),
+                           ("bin1_dist_cm", "instrument_first_cell_range_m", 0.01),
+                           ("blank_cm", "instrument_blank_m", 0.01),
+                           ("heading_bias", "instrument_heading_bias_deg", 0.01),
+                           ("pings_per_ens", "instrument_pings_per_ensemble", 1)):
+        if src.get(k) is not None:
+            try:
+                out[name] = float(src[k]) * scale if scale != 1 else int(src[k])
+            except (TypeError, ValueError):
+                pass
+    if src.get("orientation"):
+        out["instrument_orientation"] = str(src["orientation"])
+    cs = src.get("coord_system_recorded") or src.get("coord_system")
+    if cs:
+        out["instrument_coordinates_recorded"] = str(cs)
+    return out
+
+
+PROC_KEYS = ("hab", "p_atm", "nperseg", "fmin", "fmax", "kp2_min", "declination", "fs", "dt",
+             "n_short_bursts_skipped", "hm0_dir_min", "coh_min", "direction_main_level", "wave_method",
+             "has_vertical_beam")
+
+
+def _global_attrs(md: dict, ds_src: xr.Dataset, kind: str, t: np.ndarray, level: str = "L2") -> dict:
     now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ft, summary = KIND_INFO.get(kind, (None, kind))
+    t = np.asarray(t)
     a = {
         "Conventions": "CF-1.8, ACDD-1.3",
-        "featureType": "timeSeriesProfile" if kind == "currents" else "timeSeries",
-        "title": md.get("title") or f"ADCP {kind}",
-        "summary": ("Profili di corrente mediati per burst da ping singoli (Teledyne RDI Sentinel V), "
-                    "temperatura e pressione al fondo" if kind == "currents" else
-                    "Parametri d'onda per burst da tracciamento della superficie con il beam verticale "
-                    "e da pressione; direzione con metodo PUV (superficie-velocita')"),
+        "title": md.get("title") or f"ADCP Sentinel V, stazione {md.get('station_id') or 'ADCP'}: {kind}",
+        "summary": summary,
+        "product": kind,
+        "data_level": level,
         "station_id": md.get("station_id") or "ADCP",
         "platform": "struttura sul fondale, strumento rivolto verso l'alto",
         "instrument": "Teledyne RDI Sentinel V",
@@ -120,10 +186,14 @@ def _global_attrs(md: dict, ds_src: xr.Dataset, kind: str, t: np.ndarray) -> dic
         "time_coverage_start": str(pd.Timestamp(t.min())) if len(t) else "",
         "time_coverage_end": str(pd.Timestamp(t.max())) if len(t) else "",
         "date_created": now,
-        "history": f"{now}: creato con adcp_pd0 (preprocessing PD0 -> archivio)",
+        "history": f"{now}: creato con adcp_pd0 (pre-processing, livello {level})",
+        "software_version": code_version(),
         "processing_level": "dati controllati automaticamente (QC), non validati manualmente",
         "source_file": str(ds_src.attrs.get("source_file", "")),
     }
+    if ft:
+        a["featureType"] = ft
+    a.update(instrument_attrs(ds_src.attrs))
     for k in ("deployment_start", "deployment_end", "deployment_method"):
         if ds_src.attrs.get(k):
             a[k] = str(ds_src.attrs[k])
@@ -138,9 +208,34 @@ def _global_attrs(md: dict, ds_src: xr.Dataset, kind: str, t: np.ndarray) -> dic
                  geospatial_lon_min=md["longitude"], geospatial_lon_max=md["longitude"])
     # parametri di elaborazione (prefisso proc_)
     for k, v in ds_src.attrs.items():
-        if k.startswith(("qc_", "avg_")) or k in ("hab", "p_atm", "nperseg", "fmin", "fmax", "kp2_min",
-                                                    "declination", "fs", "n_short_bursts_skipped"):
+        if k.startswith(("qc_", "avg_", "burst_")) or k in PROC_KEYS:
             a[f"proc_{k}"] = v if not isinstance(v, (bool, np.bool_)) else int(v)
+    return a
+
+
+L3_KEEP = ("Conventions", "title", "station_id", "platform", "instrument", "instrument_serial_number",
+           "instrument_firmware", "source_file", "institution", "project", "creator_name", "creator_email",
+           "license", "deployment_id", "deployment_start", "deployment_end", "deployment_method", "time_zone",
+           "comment", "geospatial_vertical_reference", "magnetic_declination_deg",
+           "magnetic_declination_applied", "geospatial_lat_min", "geospatial_lat_max", "geospatial_lon_min",
+           "geospatial_lon_max", "instrument_height_above_bed_m", "processing_level")
+
+
+def l3_attrs(src_attrs: dict, kind: str, t, proc: dict | None = None) -> dict:
+    """Attributi globali di un prodotto derivato (L3) a partire da quelli del file L2 di origine."""
+    now = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ft, summary = KIND_INFO.get(kind, (None, kind))
+    t = np.asarray(t)
+    a = {k: src_attrs[k] for k in src_attrs if k in L3_KEEP or k.startswith("instrument_")}
+    a.update(summary=summary, product=kind, data_level="L3", date_created=now,
+             history=f"{now}: creato con adcp_pd0 (post-processing, livello L3)",
+             software_version=code_version(),
+             time_coverage_start=str(pd.Timestamp(t.min())) if len(t) else "",
+             time_coverage_end=str(pd.Timestamp(t.max())) if len(t) else "")
+    if ft:
+        a["featureType"] = ft
+    for k, v in (proc or {}).items():
+        a[f"proc_{k}"] = v if not isinstance(v, (bool, np.bool_)) else int(v)
     return a
 
 
@@ -244,6 +339,9 @@ def currents_archive(qc: xr.Dataset, md: dict, hab: float) -> xr.Dataset:
         ds["in_position_frac"] = ("time", qc.in_position_frac.values.astype(np.float32), dict(
             long_name="frazione di ping in posizione nell'intervallo", units="1",
             comment="se > 0 la media usa solo i ping in posizione"))
+    if gp is not None:
+        ds["valid_ping_fraction"] = (dims, gp.astype(np.float32), dict(
+            long_name="frazione di ping validi (correlazione sopra la soglia) nell'intervallo", units="1"))
     ds["u_davg"] = ("time", V("u_davg"), dict(long_name="velocita' Est media sulla verticale", units="m s-1"))
     ds["v_davg"] = ("time", V("v_davg"), dict(long_name="velocita' Nord media sulla verticale", units="m s-1"))
     ds["speed_davg"] = ("time", V("speed_davg"), dict(long_name="intensita' media sulla verticale", units="m s-1"))
@@ -256,78 +354,126 @@ def currents_archive(qc: xr.Dataset, md: dict, hab: float) -> xr.Dataset:
     return ds
 
 
-def waves_archive(w: xr.Dataset, md: dict, hm0_dir_min: float = 0.25) -> xr.Dataset:
-    t = w.time.values
-    has_vb = "Hm0_vb" in w and np.isfinite(w.Hm0_vb).any()
-    sfx = "_vb" if has_vb else ""
-    method = ("superficie tracciata con l'eco del beam verticale" if has_vb else
-              "pressione corretta con la teoria lineare")
-    ds = xr.Dataset(coords=dict(
-        time=("time", t, dict(standard_name="time", long_name="tempo (inizio del burst)", axis="T")),
-        frequency=("frequency", w.freq.values.astype(np.float32),
-                   dict(standard_name="sea_surface_wave_frequency", units="Hz"))))
-    par = dict(
-        Hm0=("sea_surface_wave_significant_height", "altezza significativa spettrale Hm0", "m"),
-        Tp=("sea_surface_wave_period_at_variance_spectral_density_maximum", "periodo di picco", "s"),
-        Tm01=("sea_surface_wave_mean_period_from_variance_spectral_density_first_frequency_moment",
-              "periodo medio Tm01", "s"),
-        Tm02=("sea_surface_wave_mean_period_from_variance_spectral_density_second_frequency_moment",
-              "periodo medio Tm02", "s"),
-    )
-    for k, (sn, ln, u) in par.items():
-        src = k + sfx
-        if src in w:
-            ds[k] = ("time", w[src].values.astype(np.float32),
-                     dict(standard_name=sn, long_name=f"{ln} ({method})", units=u, ancillary_variables="wave_qc"))
-    # flag con causa
-    hm = ds["Hm0"].values if "Hm0" in ds else np.full(len(t), np.nan)
-    n = len(t)
-    inpos = w.in_position.values.astype(bool) if "in_position" in w else np.ones(n, bool)
-    mot = w.flag_motion.values.astype(bool) if "flag_motion" in w else np.zeros(n, bool)
-    sf = w.surface_found_frac.values if (has_vb and "surface_found_frac" in w) else np.ones(n)
-    nod = ~np.isfinite(hm) & inpos
-    flag, cause = combine_flags((n,), {"fuori_posizione": ~inpos, "movimento_telaio": mot & inpos,
-                                       "superficie_trovata_parzialmente": inpos & np.isfinite(hm) & (sf < 0.9),
-                                       "nessun_dato": nod}, WAVE_CAUSES)
-    ds["wave_qc"] = ("time", flag, dict(long_name="flag di qualita' dei parametri d'onda",
-                                        ancillary_variables="wave_qc_cause", **FLAG_ATTRS))
-    ds["wave_qc_cause"] = ("time", cause, cause_attrs(WAVE_CAUSES, "parametri d'onda"))
-    if "Dp" in w:
-        ds["Dp"] = ("time", w.Dp.values.astype(np.float32), dict(
-            standard_name="sea_surface_wave_from_direction_at_variance_spectral_density_maximum",
-            long_name="direzione di provenienza al picco, da Nord orario", units="degree",
-            ancillary_variables="direction_qc"))
-        ds["Dm"] = ("time", w.Dm.values.astype(np.float32), dict(
-            standard_name="sea_surface_wave_from_direction",
-            long_name="direzione media di provenienza, da Nord orario", units="degree",
-            ancillary_variables="direction_qc"))
-        dok = np.isfinite(w.Dp.values)
-        dflag, dcause = combine_flags((n,), {"fuori_posizione": ~inpos, "movimento_telaio": mot & inpos,
-                                             "bassa_energia": inpos & dok & (np.nan_to_num(hm) < hm0_dir_min),
-                                             "nessun_dato": inpos & ~dok}, DIR_CAUSES)
-        ds["direction_qc"] = ("time", dflag, dict(long_name="flag di qualita' delle direzioni",
-                                                   ancillary_variables="direction_qc_cause",
-                                                   comment=f"bassa_energia: Hm0 < {hm0_dir_min} m", **FLAG_ATTRS))
-        ds["direction_qc_cause"] = ("time", dcause, cause_attrs(DIR_CAUSES, "direzione"))
-    if has_vb:
-        ds["Hm0_pressure"] = ("time", w.Hm0.values.astype(np.float32), dict(
-            long_name="Hm0 da pressione (solo frequenze sotto la frequenza di taglio)", units="m",
-            comment="in acqua profonda sottostima: non usare come Hm0"))
-        ds["S"] = (("time", "frequency"), w.S_vb.values.astype(np.float32), dict(
-            standard_name="sea_surface_wave_variance_spectral_density", units="m2 Hz-1",
-            long_name="spettro di elevazione (beam verticale)"))
-        ds["surface_found_frac"] = ("time", w.surface_found_frac.values.astype(np.float32),
-                                    dict(long_name="frazione di ping con superficie trovata", units="1"))
-    ds["S_pressure"] = (("time", "frequency"), w.S_p.values.astype(np.float32), dict(
-        units="m2 Hz-1", long_name="spettro di elevazione da pressione (fino alla frequenza di taglio)"))
-    ds["fcut_pressure"] = ("time", w.fcut.values.astype(np.float32),
-                           dict(long_name="frequenza di taglio per la pressione", units="Hz"))
-    ds["water_depth"] = ("time", w.depth.values.astype(np.float32), dict(
-        standard_name="sea_floor_depth_below_sea_surface", units="m", long_name="profondita' media nel burst"))
-    ds["n_samples"] = ("time", w.n.values.astype(np.int32), dict(long_name="campioni nel burst", units="1"))
+def wave_bursts_archive(b: xr.Dataset, md: dict, dep: dict | None = None, p_min: float = 1.0) -> xr.Dataset:
+    """Prodotto L2 delle serie dei burst d'onda: flag per burst e metadati CF."""
+    from .deployment import in_position, motion_overlap
+    ds = b.copy()
+    nb = ds.sizes["time"]
+    dt = float(b.attrs.get("dt", 0.5))
+    t0 = ds.time.values
+    t1 = t0 + (ds["n_samples"].values.astype(float) * dt * 1e6).astype("timedelta64[us]")
+    inpos, mot = np.ones(nb, bool), np.zeros(nb, bool)
+    if dep is not None:
+        inpos = in_position(t0, dep) & in_position(t1 - np.timedelta64(1, "us"), dep)
+        mot = motion_overlap(t0, t1, dep)
+    inpos &= np.nan_to_num(ds["depth_sensor"].values) * 1025.0 * 9.81 / 1e4 >= p_min
+    has_eta = "eta" in ds
+    data_ok = np.isfinite(ds["eta"].values).any(axis=1) if has_eta else np.isfinite(ds["pressure"].values).any(axis=1)
+    sf = np.nan_to_num(ds["surface_found_frac"].values, nan=0.0) if has_eta else np.ones(nb)
+    flag, cause = combine_flags((nb,), {
+        "fuori_posizione": ~inpos, "movimento_telaio": mot & inpos,
+        "superficie_trovata_parzialmente": inpos & data_ok & (sf < 0.9),
+        "nessun_dato": inpos & ~data_ok}, WAVE_CAUSES)
+    ds["burst_qc"] = ("time", flag, dict(long_name="flag di qualita' del burst",
+                                         ancillary_variables="burst_qc_cause", **FLAG_ATTRS))
+    ds["burst_qc_cause"] = ("time", cause, cause_attrs(WAVE_CAUSES, "burst"))
+    ds["in_position"] = ("time", inpos.astype(np.int8), dict(long_name="1 = strumento in posizione sul fondo"))
+    ds["platform_motion"] = ("time", mot.astype(np.int8), dict(long_name="1 = telaio in movimento durante il burst"))
+    hab = float(b.attrs.get("hab", md.get("instrument_height_above_bed_m") or 0.6))
+    va = dict(
+        pressure=dict(standard_name="sea_water_pressure", units="dbar", long_name="pressione al sensore"),
+        surface_range=dict(units="m", long_name="distanza trasduttore-superficie dal massimo di eco del beam "
+                           "verticale (grezza; mancante dove il picco non e' netto)"),
+        eta=dict(units="m", long_name="elevazione della superficie rispetto alla media del burst (pulita)",
+                 comment="spike oltre 4 MAD rimossi, buchi interpolati se < 15% dei ping; mancante per "
+                         "tutto il burst se i buchi sono di piu'"),
+        u=dict(standard_name="eastward_sea_water_velocity", units="m s-1", long_name="velocita' verso Est"),
+        v=dict(standard_name="northward_sea_water_velocity", units="m s-1", long_name="velocita' verso Nord"),
+        corr_ok_frac=dict(units="1", long_name="frazione di ping con correlazione sopra la soglia"),
+        n_samples=dict(units="1", long_name="ping nel burst"),
+        depth_sensor=dict(units="m", long_name="profondita' del sensore (pressione media / (rho g))"),
+        water_depth=dict(standard_name="sea_floor_depth_below_sea_surface", units="m",
+                         long_name="profondita' totale media nel burst"),
+        surface_found_frac=dict(units="1", long_name="frazione di ping con superficie trovata"),
+        surface_range_mean=dict(units="m", long_name="distanza media trasduttore-superficie nel burst"),
+        heading=dict(units="degree", long_name="heading medio nel burst"),
+        pitch=dict(units="degree", long_name="pitch medio nel burst"),
+        roll=dict(units="degree", long_name="roll medio nel burst"))
+    for k, at in va.items():
+        if k in ds:
+            ds[k].attrs.update(at)
+    ds["time"].attrs.update(standard_name="time", long_name="inizio del burst", axis="T")
+    ds["sample_time"].attrs.update(units="s", long_name="tempo dall'inizio del burst")
+    if "level_range" in ds.coords:
+        ds["level_range"].attrs.update(units="m", long_name="distanza della cella dal trasduttore")
+        ds = ds.assign_coords(level_height=("level", (ds["level_range"].values + hab).astype(np.float32),
+                                            dict(units="m", standard_name="height_above_sea_floor",
+                                                 long_name="quota della cella sul fondale")))
+        ds["level_cell"].attrs.update(long_name="indice (da 0) della cella nello stream")
     ds = _station_coords(ds, md)
-    ds.attrs = _global_attrs(md, w, "waves", t)
-    ds.attrs["wave_method"] = method
+    src = xr.Dataset(attrs=dict(b.attrs))
+    if dep:
+        src.attrs.update(deployment_start=dep["start"], deployment_end=dep["end"],
+                         deployment_method=dep.get("method", ""))
+    ds.attrs = _global_attrs(md, src, "wave_bursts", t0)
+    return ds
+
+
+WAVE_VAR_ATTRS = dict(
+    Hm0=dict(standard_name="sea_surface_wave_significant_height", units="m",
+             long_name="altezza significativa spettrale Hm0 = 4 sqrt(m0)", ancillary_variables="wave_qc"),
+    Tp=dict(standard_name="sea_surface_wave_period_at_variance_spectral_density_maximum", units="s",
+            long_name="periodo di picco", ancillary_variables="wave_qc"),
+    Tm01=dict(standard_name="sea_surface_wave_mean_period_from_variance_spectral_density_first_frequency_moment",
+              units="s", long_name="periodo medio Tm01", ancillary_variables="wave_qc"),
+    Tm02=dict(standard_name="sea_surface_wave_mean_period_from_variance_spectral_density_second_frequency_moment",
+              units="s", long_name="periodo medio Tm02", ancillary_variables="wave_qc"),
+    Ub=dict(units="m s-1", long_name="ampiezza significativa della velocita' orbitale al fondo (teoria lineare, "
+            "2 volte la deviazione standard)", ancillary_variables="wave_qc"),
+    S=dict(standard_name="sea_surface_wave_variance_spectral_density", units="m2 Hz-1",
+           long_name="spettro di elevazione"),
+    Hm0_pressure=dict(units="m", long_name="Hm0 da pressione (solo frequenze sotto la frequenza di taglio)",
+                      comment="in acqua profonda sottostima: solo per confronto"),
+    fcut_pressure=dict(units="Hz", long_name="frequenza di taglio per la pressione"),
+    S_pressure=dict(units="m2 Hz-1", long_name="spettro di elevazione da pressione (fino alla frequenza di taglio)"),
+    Dp=dict(standard_name="sea_surface_wave_from_direction_at_variance_spectral_density_maximum", units="degree",
+            long_name="direzione di provenienza al picco, da Nord orario (quota principale)",
+            ancillary_variables="direction_qc"),
+    Dm=dict(standard_name="sea_surface_wave_from_direction", units="degree",
+            long_name="direzione media di provenienza, da Nord orario (quota principale)",
+            ancillary_variables="direction_qc"),
+    Dp_level=dict(units="degree", long_name="direzione di provenienza al picco stimata a ogni quota"),
+    Dm_level=dict(units="degree", long_name="direzione media di provenienza stimata a ogni quota"),
+    dir_level_spread=dict(units="degree", long_name="massima differenza di Dp fra le quote (indice di incertezza)"),
+    dir_coherence=dict(units="1", long_name="coerenza^2 fra elevazione e velocita' orizzontali al picco"),
+    direction_f=dict(units="degree", long_name="direzione di provenienza per frequenza (quota principale)"),
+    water_depth=dict(standard_name="sea_floor_depth_below_sea_surface", units="m",
+                     long_name="profondita' totale media nel burst"),
+    n_samples=dict(units="1", long_name="ping nel burst"),
+    surface_found_frac=dict(units="1", long_name="frazione di ping con superficie trovata"),
+    in_position=dict(long_name="1 = strumento in posizione sul fondo"),
+    platform_motion=dict(long_name="1 = telaio in movimento durante il burst"),
+)
+
+
+def waves_l3(w: xr.Dataset, src_attrs: dict) -> xr.Dataset:
+    """Prodotto L3 delle onde: attributi CF delle variabili, dei flag e globali."""
+    ds = w.copy()
+    for k, at in WAVE_VAR_ATTRS.items():
+        if k in ds:
+            ds[k].attrs.update(at)
+    ds["time"].attrs.update(standard_name="time", long_name="inizio del burst", axis="T")
+    ds["frequency"].attrs.update(standard_name="sea_surface_wave_frequency", units="Hz")
+    if "level_range" in ds.coords:
+        ds["level_range"].attrs.update(units="m", long_name="distanza della cella dal trasduttore")
+    ds["wave_qc"].attrs.update(long_name="flag di qualita' dei parametri d'onda",
+                               ancillary_variables="wave_qc_cause", **FLAG_ATTRS)
+    ds["wave_qc_cause"].attrs.update(cause_attrs(WAVE_CAUSES, "parametri d'onda"))
+    if "direction_qc" in ds:
+        ds["direction_qc"].attrs.update(long_name="flag di qualita' delle direzioni",
+                                        ancillary_variables="direction_qc_cause", **FLAG_ATTRS)
+        ds["direction_qc_cause"].attrs.update(cause_attrs(DIR_CAUSES, "direzione"))
+    ds.attrs = l3_attrs(src_attrs, "waves", ds.time.values, dict(w.attrs))
     return ds
 
 
@@ -441,139 +587,3 @@ def temperature_archive(h: pd.DataFrame, md: dict, src_attrs: dict, deployment: 
     ds.attrs["summary"] = ("Temperatura dell'acqua al fondo, media oraria di tutti i ping del sensore "
                            "dello strumento (Teledyne RDI Sentinel V)")
     return ds
-
-
-def write_archive(outdir: str, md: dict, hab: float, verbose: bool = True, p_min: float = 1.0) -> list:
-    mh = md.get("instrument_height_above_bed_m")
-    if mh is not None and abs(float(mh) - hab) > 1e-6:
-        print(f"ATTENZIONE: --hab {hab} diverso da instrument_height_above_bed_m={mh} nei metadati: "
-              f"si usa --hab (lo stesso usato per le onde)")
-    md = dict(md, instrument_height_above_bed_m=hab)
-    adir = os.path.join(outdir, "archive")
-    os.makedirs(adir, exist_ok=True)
-    written = []
-    sid = (md.get("station_id") or "ADCP").replace(" ", "_")
-    fmt = lambda t: pd.Timestamp(t).strftime("%Y%m%d")
-    pc, pw = os.path.join(outdir, "currents_qc.nc"), os.path.join(outdir, "waves_bulk.nc")
-    c = wa = h = r = None
-    bases = []
-    if os.path.exists(pc):
-        qc = xr.load_dataset(pc)
-        c = currents_archive(qc, md, hab)
-        base = os.path.join(adir, f"{sid}_{fmt(c.time.values.min())}_{fmt(c.time.values.max())}")
-        bases.append(base)
-        c.to_netcdf(base + "_currents.nc", encoding=_encoding(c))
-        written.append(base + "_currents.nc")
-        cols = [k for k in ("deployment_qc", "platform_motion", "temperature", "pressure", "water_depth",
-                            "heading", "pitch", "roll", "n_pings", "in_position_frac",
-                            "u_davg", "v_davg", "speed_davg", "dir_davg") if k in c]
-        df = c[cols].to_dataframe()[cols]
-        df.insert(1, "deployment_qc_cause", cause_text(c.deployment_qc_cause.values, POS_CAUSES))
-        units = ", ".join(f"{k} [{c[k].attrs.get('units', '')}]" for k in cols)
-        _write_csv(base + "_timeseries.csv", df, _csv_header(c, f"# colonne: {units}"))
-        written.append(base + "_timeseries.csv")
-        bits_doc = "# bit di causa: " + ", ".join(f"{b}={n}" for b, n, _ in VEL_CAUSES)
-        for k in ("u", "v", "speed", "direction", "vel_qc", "vel_qc_cause"):
-            m = pd.DataFrame(c[k].values, index=pd.DatetimeIndex(c.time.values, name="time"),
-                             columns=[f"z{z:.2f}m" for z in c.z.values])
-            extra = f"# {k} [{c[k].attrs.get('units', 'flag')}]; colonne = quota sul fondale"
-            if k == "vel_qc_cause":
-                extra += "\n" + bits_doc + " (valore = somma dei bit)"
-            _write_csv(base + f"_currents_{k}.csv", m, _csv_header(c, extra))
-            written.append(base + f"_currents_{k}.csv")
-    if os.path.exists(pw):
-        w = xr.load_dataset(pw)
-        wa = waves_archive(w, md)
-        base = os.path.join(adir, f"{sid}_{fmt(wa.time.values.min())}_{fmt(wa.time.values.max())}")
-        bases.append(base)
-        wa.to_netcdf(base + "_waves.nc", encoding=_encoding(wa))
-        written.append(base + "_waves.nc")
-        cols = [k for k in ("Hm0", "Tp", "Tm01", "Tm02", "Dp", "Dm", "wave_qc", "direction_qc",
-                            "water_depth", "Hm0_pressure", "n_samples") if k in wa]
-        df = wa[cols].to_dataframe()[cols]
-        df.insert(df.columns.get_loc("wave_qc") + 1, "wave_qc_cause", cause_text(wa.wave_qc_cause.values, WAVE_CAUSES))
-        if "direction_qc" in df:
-            df.insert(df.columns.get_loc("direction_qc") + 1, "direction_qc_cause",
-                      cause_text(wa.direction_qc_cause.values, DIR_CAUSES))
-        units = ", ".join(f"{k} [{wa[k].attrs.get('units', 'flag')}]" for k in cols)
-        _write_csv(base + "_waves.csv", df, _csv_header(wa, f"# metodo: {wa.attrs['wave_method']}\n# colonne: {units}"))
-        written.append(base + "_waves.csv")
-    # temperatura: media oraria da tutti i ping
-    try:
-        from .convert import load_inventory, StreamReader
-        from .deployment import get_deployment
-        inv = load_inventory(outdir)
-        name = next((n for n, s_ in inv["streams"].items() if s_.get("label") in ("waves", "currents")), None)
-    except FileNotFoundError:
-        name = None
-    if name:
-        r = StreamReader(outdir, name)
-        if "temperature" in r.variables():
-            dep = get_deployment(outdir, r, p_min=p_min)
-            h = hourly_temperature(r, dep, p_min=p_min)
-            ta = temperature_archive(h, md, r.attrs, dep)
-            base = os.path.join(adir, f"{sid}_{fmt(h.index.min())}_{fmt(h.index.max())}")
-            enc = _encoding(ta)
-            enc["time_bnds"] = dict(TIME_ENC)
-            ta.to_netcdf(base + "_temperature_hourly.nc", encoding=enc)
-            written.append(base + "_temperature_hourly.nc")
-            cols = ["temperature_mean", "temperature_std", "temperature_min", "temperature_max",
-                    "n_samples", "sampled_minutes", "qc"]
-            hc = h[cols].copy()
-            hc["qc_cause"] = cause_text(h.qc_cause.values, TEMP_CAUSES)
-            _write_csv(base + "_temperature_hourly.csv", hc, _csv_header(
-                ta, "# temperatura dell'acqua al fondo [degree_Celsius], media oraria; time_start = inizio "
-                    "dell'ora; qc: 1 in posizione, 3 pochi dati, 4 fuori posizione, 9 nessun dato"))
-            written.append(base + "_temperature_hourly.csv")
-            try:
-                _plot_temperature(h, os.path.join(outdir, "figures", "temperature_hourly.png"))
-            except Exception as e:
-                print(f"  (grafico temperatura non prodotto: {e})")
-    if h is not None:
-        try:
-            from .plots import plot_temperature_overlays
-            plot_temperature_overlays(h, wa, c, dep if name else None, os.path.join(outdir, "figures"))
-        except Exception as e:
-            print(f"  (grafici temperatura/onde/corrente non prodotti: {e})")
-    if bases:
-        from .report import write_report
-        rep = write_report(outdir, md, hab, bases[0], c=c, wa=wa, h=h, written=list(written), reader=r)
-        written.append(rep)
-    if r is not None:
-        r.close()
-    guide = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "LEGGIMI_DATI.md")
-    if os.path.exists(guide):
-        import shutil
-        dst = os.path.join(adir, "LEGGIMI_DATI.md")
-        shutil.copyfile(guide, dst)
-        written.append(dst)
-    if verbose:
-        print("\nArchivio:")
-        for f in written:
-            print(f"  {f}")
-    return written
-
-
-def _plot_temperature(h, path):
-    import matplotlib.pyplot as plt
-    from . import plots as P
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fig, ax = plt.subplots(figsize=(11, 3.4), layout="constrained")
-    good = h.qc.values == 1
-    t = h.index.values
-    ax.plot(t, np.where(good, h.temperature_mean, np.nan), color=P.C1, lw=1.2, label="in posizione")
-    ax.plot(t[~good], h.temperature_mean.values[~good], "o", ms=2, color=P.AXIS,
-            label="fuori posizione / pochi dati (flag 3-4)")
-    ax.fill_between(t, np.where(good, h.temperature_min, np.nan), np.where(good, h.temperature_max, np.nan),
-                    color=P.C1, alpha=0.15, lw=0)
-    ax.set_ylabel("°C")
-    if good.any():
-        lo, hi = np.nanmin(h.temperature_min.values[good]), np.nanmax(h.temperature_max.values[good])
-        pad = max(0.2, 0.05 * (hi - lo))
-        ax.set_ylim(lo - pad, hi + pad)
-    nbad = int((h.qc.values != 1).sum())
-    ax.set_title("Temperatura al fondo, media oraria (banda: minimo-massimo nell'ora)"
-                 + (f"; {nbad} ore con flag 3/4/9, valori fuori scala non mostrati" if nbad else ""))
-    ax.legend(loc="best", ncols=2)
-    P._fmt_time(ax)
-    P._save(fig, path)

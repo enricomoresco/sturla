@@ -1,7 +1,7 @@
 {
-  "_istruzioni": "Compilare e salvare come metadata.json; i campi che iniziano con _ sono ignorati. Lasciare null se non noto.",
-  "station_id": "STURLA",
-  "title": "ADCP Sentinel V - Sturla (Genova): correnti, onde, temperatura al fondo",
+  "_istruzioni": "Compilare e salvare come metadata.json (uno per deployment); i campi che iniziano con _ sono ignorati. Lasciare null se non noto. Se station_id e' null si usa il nome del file PD0 (es. sturla_20260707T125042.pd0 -> STURLA).",
+  "station_id": null,
+  "title": null,
   "institution": null,
   "project": null,
   "creator_name": null,

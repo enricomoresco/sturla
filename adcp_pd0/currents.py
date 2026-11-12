@@ -259,6 +259,7 @@ def average_pings(reader, window_min: float | None = None, corr_min: int = 64, b
         if verbose:
             print(f"  medie ping: gruppo {gi + 1}/{len(groups)} ({len(out['time'])} profili)", flush=True)
     attrs = dict(a)
+    attrs.update(coord_system_recorded=a.get("coord_system", ""))
     attrs.update(coord_system="earth", averaged_from="single pings", avg_window_min=window_min or 0,
                  avg_corr_min=corr_min, avg_min_good_frac=min_good_frac)
     attrs.pop("transformation_matrix", None)

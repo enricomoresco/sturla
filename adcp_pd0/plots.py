@@ -1,7 +1,6 @@
-"""Grafici quick-look (matplotlib, PNG)."""
+"""Stile comune dei grafici (matplotlib, PNG) e panoramica dei sensori ausiliari."""
 from __future__ import annotations
 
-import os
 import warnings
 
 import matplotlib
@@ -9,7 +8,8 @@ matplotlib.use("Agg")
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import LinearSegmentedColormap, LogNorm
+import pandas as pd
+from matplotlib.colors import LinearSegmentedColormap
 
 # palette: categoriali (ordine fisso), rampa sequenziale blu, divergente blu-grigio-rosso
 C1, C2, C3 = "#2a78d6", "#eb6834", "#1baf7a"
@@ -29,7 +29,7 @@ plt.rcParams.update({
     "text.color": INK, "axes.grid": True, "grid.color": GRID, "grid.linewidth": 0.6,
     "axes.spines.top": False, "axes.spines.right": False, "lines.linewidth": 1.2,
     "font.size": 9, "axes.titlesize": 10, "axes.titleweight": "bold", "axes.titlelocation": "left",
-    "legend.frameon": False,
+    "legend.frameon": False, "axes.formatter.useoffset": False,
 })
 
 
@@ -55,10 +55,43 @@ def _bin_series(t, y, nbins=3000):
     return tc, m.squeeze()
 
 
-def _fmt_time(ax):
-    loc = mdates.AutoDateLocator()
+MESI = ("gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic")
+_MONTHS_EN = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _it(s: str) -> str:
+    """Abbreviazioni dei mesi in italiano (strftime le scrive nella lingua di sistema, di norma inglese)."""
+    for en, it in zip(_MONTHS_EN, MESI):
+        s = s.replace(en, it)
+    return s
+
+
+def data_it(t, year: bool = False, hm: bool = False) -> str:
+    """Data in italiano: '9 ott', '9 ott 2026', '9 ott 22:00'."""
+    t = pd.Timestamp(t)
+    s = f"{t.day} {MESI[t.month - 1]}"
+    if year:
+        s += f" {t.year}"
+    if hm:
+        s += f" {t:%H:%M}"
+    return s
+
+
+class _ItalianDates(mdates.ConciseDateFormatter):
+    def format_ticks(self, values):
+        return [_it(s) for s in super().format_ticks(values)]
+
+    def get_offset(self):
+        return _it(super().get_offset())
+
+
+def _fmt_time(ax, maxticks=None):
+    """Asse dei tempi con date concise in italiano; ``maxticks`` limita le etichette nei pannelli stretti."""
+    loc = mdates.AutoDateLocator(minticks=3, maxticks=maxticks) if maxticks else mdates.AutoDateLocator()
     ax.xaxis.set_major_locator(loc)
-    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(loc))
+    ax.xaxis.set_major_formatter(_ItalianDates(
+        loc, zero_formats=["", "%Y", "%b", "%d %b", "%H:%M", "%H:%M"],
+        offset_formats=["", "%Y", "%b %Y", "%d %b %Y", "%d %b %Y", "%d %b %Y %H:%M"]))
 
 
 def _save(fig, path):
@@ -90,301 +123,3 @@ def plot_overview(ds, path, title=""):
     _fmt_time(ax)
     axs[0].set_title(title or "Sensori ausiliari")
     _save(fig, path)
-
-
-def _bin_2d(t, Z, nbins=1500):
-    tb, zb = _bin_series(t, Z, nbins)
-    return tb, np.atleast_2d(zb)
-
-
-def plot_current_sections(qc, path):
-    rng = qc.range.values
-    t = qc.time.values
-    fields = [("u", "Velocita' Est [m/s]", DIV, True), ("v", "Velocita' Nord [m/s]", DIV, True),
-              ("speed", "Intensita' [m/s]", SEQ, False)]
-    if "echo_mean" in qc:
-        fields.append(("echo_mean", "Eco media [counts]", SEQ, False))
-    fig, axs = plt.subplots(len(fields), 1, figsize=(11, 2.4 * len(fields)), sharex=True,
-                            layout="constrained")
-    for ax, (k, lab, cmap, sym) in zip(axs, fields):
-        tb, Z = _bin_2d(t, qc[k].values)
-        if sym:
-            vmax = np.nanpercentile(np.abs(Z), 98) if np.isfinite(Z).any() else 1
-            kw = dict(vmin=-vmax, vmax=vmax)
-        else:
-            kw = dict(vmin=np.nanpercentile(Z, 2), vmax=np.nanpercentile(Z, 98)) if np.isfinite(Z).any() else {}
-        pc = ax.pcolormesh(tb, rng, Z.T, cmap=cmap, shading="nearest", rasterized=True, **kw)
-        fig.colorbar(pc, ax=ax, pad=0.01, aspect=15).set_label(lab, color=INK2)
-        if "depth_xducer" in qc.coords and qc.attrs.get("orientation") == "up":
-            tb2, d = _bin_series(t, qc.depth_xducer.values, len(tb))
-            ax.plot(tb2, d, color=INK, lw=0.8, label="superficie")
-        ax.set_ylim(rng.min() - 0.5, rng.max() + 0.5)
-        ax.set_ylabel("Distanza dall'ADCP [m]")
-        ax.set_title(lab)
-        ax.grid(False)
-    _fmt_time(axs[-1])
-    _save(fig, path)
-
-
-def plot_current_summary(qc, path):
-    fig = plt.figure(figsize=(12, 6.5), layout="constrained")
-    gs = fig.add_gridspec(2, 3)
-    t = qc.time.values
-    ax1 = fig.add_subplot(gs[0, :2])
-    tb, s = _bin_series(t, qc.speed_davg.values)
-    ax1.plot(tb, s, color=C1)
-    ax1.set_ylabel("m/s")
-    ax1.set_title("Intensita' corrente media sulla verticale")
-    _fmt_time(ax1)
-    ax2 = fig.add_subplot(gs[1, :2], sharex=ax1)
-    ax2.plot(t, qc.dir_davg.values, ".", ms=2, color=C1, alpha=0.5)
-    ax2.set_ylim(0, 360)
-    ax2.set_yticks([0, 90, 180, 270, 360])
-    ax2.set_ylabel("° (verso cui va)")
-    ax2.set_title("Direzione corrente media sulla verticale")
-    _fmt_time(ax2)
-    ax3 = fig.add_subplot(gs[:, 2])
-    rng = qc.range.values
-    ok = qc.valid_fraction.values > 0.5
-    for k, c in (("u", C1), ("v", C2), ("speed", C3)):
-        m = np.nanmean(qc[k].values, axis=0)
-        sd = np.nanstd(qc[k].values, axis=0)
-        m[~ok] = np.nan
-        sd[~ok] = np.nan
-        ax3.fill_betweenx(rng, m - sd, m + sd, color=c, alpha=0.12, lw=0)
-        ax3.plot(m, rng, color=c, label=k, lw=2)
-    ax3.axvline(0, color=AXIS, lw=0.8)
-    ax3.set_xlabel("m/s")
-    ax3.set_ylabel("Distanza dall'ADCP [m]")
-    ax3.set_title("Profilo medio (±1 dev. std)")
-    ax3.legend(loc="upper right")
-    _save(fig, path)
-
-
-def plot_waves_bulk(w, path, hm0_dir_min=0.25):
-    has_vb = "Hm0_vb" in w and np.isfinite(w.Hm0_vb).any()
-    has_dir = "Dp" in w and np.isfinite(w.Dp).any()
-    n = 3 + int(has_dir)
-    fig, axs = plt.subplots(n, 1, figsize=(11, 2.2 * n), sharex=True, layout="constrained")
-    t = w.time.values
-    fc = float(np.nanmedian(w.fcut)) if "fcut" in w else np.nan
-    lab_p = f"Hm0 da pressione (solo T > {1 / fc:.1f} s)" if np.isfinite(fc) and fc > 0 else "Hm0 da pressione"
-    ax = axs[0]
-    if has_vb:
-        ax.plot(t, w.Hm0_vb, color=C1, marker="o", ms=2.5, label="Hm0 da beam verticale")
-    ax.plot(t, w.Hm0, color=C2 if has_vb else C1, marker="o", ms=2.5, label=lab_p)
-    ax.legend(loc="best", ncols=2)
-    ax.set_ylabel("m")
-    ax.set_title("Altezza d'onda significativa Hm0")
-    ax = axs[1]
-    if has_vb:
-        ax.plot(t, w.Tp_vb, color=C1, marker="o", ms=2.5, label="Tp")
-        ax.plot(t, w.Tm02_vb, color=C2, marker="o", ms=2.5, label="Tm02")
-        ax.set_title("Periodi (beam verticale)")
-    else:
-        ax.plot(t, w.Tp, color=C1, marker="o", ms=2.5, label="Tp")
-        ax.plot(t, w.Tm02, color=C2, marker="o", ms=2.5, label="Tm02")
-        ax.set_title("Periodi (da pressione)")
-    ax.legend(loc="best", ncols=2)
-    ax.set_ylabel("s")
-    i = 2
-    if has_dir:
-        ax = axs[i]
-        hm = (w.Hm0_vb if has_vb else w.Hm0).values
-        strong = hm >= hm0_dir_min
-        ax.plot(t[~strong], w.Dp.values[~strong], "o", ms=2.5, color=AXIS,
-                label=f"Dp con Hm0 < {hm0_dir_min} m (poco affidabile)")
-        ax.plot(t[strong], w.Dp.values[strong], "o", ms=3.5, color=C1, label="Dp")
-        ax.plot(t[strong], w.Dm.values[strong], "o", ms=3.5, color=C2, mfc="none", label="Dm")
-        ax.set_ylim(0, 360)
-        ax.set_yticks([0, 90, 180, 270, 360])
-        ax.set_ylabel("° (provenienza)")
-        ax.legend(loc="best", ncols=3)
-        ref = "superficie beam verticale" if float(np.nanmax(w.get("dir_ref_vb", np.zeros(1)))) > 0 else "pressione"
-        ax.set_title(f"Direzione di provenienza (cross-spettri {ref} - velocita')")
-        i += 1
-    ax = axs[i]
-    ax.plot(t, w.depth, color=C1, marker="o", ms=2.5)
-    ax.ticklabel_format(axis="y", useOffset=False)
-    ax.set_ylabel("m")
-    ax.set_title("Profondita' media per burst")
-    _fmt_time(axs[-1])
-    _save(fig, path)
-
-
-def plot_waves_spectrogram(w, path, var="S_p"):
-    S = w[var].values
-    f = w.freq.values
-    good = np.isfinite(S) & (S > 0)
-    if not good.any():
-        return
-    fig, ax = plt.subplots(figsize=(11, 3.6), layout="constrained")
-    vmax = np.nanpercentile(S[good], 99.5)
-    pc = ax.pcolormesh(w.time.values, f, np.where(good, S, np.nan).T, cmap=SEQ, shading="nearest",
-                       norm=LogNorm(vmin=vmax / 1e3, vmax=vmax), rasterized=True)
-    fig.colorbar(pc, ax=ax, pad=0.01).set_label("S(f) [m²/Hz]", color=INK2)
-    if var == "S_p":
-        fmax = np.nanmax(w.fcut.values) if "fcut" in w else f.max()
-        ax.set_ylim(0, min(f.max(), fmax * 1.1 if np.isfinite(fmax) else f.max()))
-    else:
-        ax.set_ylim(0, min(f.max(), 0.6))
-    ax.set_ylabel("Frequenza [Hz]")
-    ax.set_title("Spettro di elevazione per burst" + (" (pressione)" if var == "S_p" else " (beam verticale)"))
-    ax.grid(False)
-    _fmt_time(ax)
-    _save(fig, path)
-
-
-def plot_wave_burst(w, path, i=None):
-    """Spettro del burst con Hm0 massimo (o dell'indice i)."""
-    if i is None:
-        i = int(np.nanargmax(w.Hm0.values))
-    f = w.freq.values
-    fig, ax = plt.subplots(figsize=(7, 4), layout="constrained")
-    ax.semilogy(f, w.S_p.values[i], color=C1, lw=2, label="da pressione")
-    if "S_vb" in w:
-        ax.semilogy(f, w.S_vb.values[i], color=C2, lw=2, label="da beam verticale")
-    if "fcut" in w and np.isfinite(w.fcut.values[i]):
-        ax.axvline(w.fcut.values[i], color=MUTED, ls="--", lw=1)
-        ax.annotate("f taglio", (w.fcut.values[i], ax.get_ylim()[1]), xytext=(3, -12),
-                    textcoords="offset points", color=INK2)
-    ax.set_xlabel("Frequenza [Hz]")
-    ax.set_ylabel("S(f) [m²/Hz]")
-    ax.set_xlim(0, f.max())
-    t = str(w.time.values[i])[:16]
-    ax.set_title(f"Burst {t}: Hm0={float(w.Hm0[i]):.2f} m, Tp={float(w.Tp[i]):.1f} s")
-    ax.legend()
-    _save(fig, path)
-
-
-def plot_all(outdir, qc=None, waves=None, aux=None):
-    fdir = os.path.join(outdir, "figures")
-    os.makedirs(fdir, exist_ok=True)
-    for name, ds in (aux or {}).items():
-        plot_overview(ds, os.path.join(fdir, f"overview_{name}.png"), f"Sensori ausiliari - stream {name}")
-    if qc is not None:
-        plot_current_sections(qc, os.path.join(fdir, "currents_sections.png"))
-        plot_current_summary(qc, os.path.join(fdir, "currents_summary.png"))
-    if waves is not None and waves.sizes.get("time", 0):
-        plot_waves_bulk(waves, os.path.join(fdir, "waves_bulk.png"))
-        plot_waves_spectrogram(waves, os.path.join(fdir, "waves_spectrogram.png"))
-        if "S_vb" in waves:
-            plot_waves_spectrogram(waves, os.path.join(fdir, "waves_spectrogram_vb.png"), "S_vb")
-        if np.isfinite(waves.Hm0.values).any():
-            plot_wave_burst(waves, os.path.join(fdir, "waves_burst_example.png"))
-
-
-def plot_temperature_overlays(h, wa, c, dep, fdir, n_bottom_cells=3, n_surface_cells=3, surface_max_m=7.0):
-    """Temperatura al fondo (media giornaliera, asse sinistro) sovrapposta a Hm0 e alla corrente
-    al fondo (asse destro). ``h``: DataFrame orario (archive.hourly_temperature); ``wa``, ``c``:
-    dataset d'archivio onde e correnti; ``dep``: deployment.json."""
-    import pandas as pd
-    C_T, C_OUT, C_W, C_C = C1, "#e34948", C2, C3
-    Tin = h.temperature_mean.where(h.qc.isin([1, 3]))
-    Tout = h.temperature_mean.where(h.qc == 4)
-    d_in, d_out = Tin.resample("1D").mean(), Tout.resample("1D").mean()
-    # giorni misti (in parte in posizione, in parte no) esclusi, come il giorno del recupero
-    mixed = d_in.notna() & d_out.notna()
-    d_in, d_out = d_in[~mixed], d_out[~mixed]
-    ends = [pd.Timestamp(e["start"]) for e in (dep or {}).get("motion_events", [])]
-    s_in, s_end = (pd.Timestamp(dep["start"]), pd.Timestamp(dep["end"])) if dep else (None, None)
-
-    def base(ax):
-        ax.plot(d_in.index + pd.Timedelta("12h"), d_in.values, "-o", ms=3, lw=1.8, color=C_T,
-                label="Temperatura al fondo, media giornaliera (in posizione)")
-        if d_out.notna().any():
-            ax.plot(d_out.index + pd.Timedelta("12h"), d_out.values, "-o", ms=3, lw=1.8, color=C_OUT,
-                    label="Temperatura, periodo non affidabile (fuori posizione)")
-        if s_end is not None:
-            last = h.index.max() + pd.Timedelta("1h")
-            if s_end < last:
-                ax.axvspan(s_end, last, color=C_OUT, alpha=0.07, lw=0)
-            if s_in > h.index.min():
-                ax.axvspan(h.index.min(), s_in, color=C_OUT, alpha=0.07, lw=0)
-        for i, m in enumerate(ends):
-            ax.axvline(m, color=INK2, ls="--", lw=1.1, label="Movimento del telaio" if i == 0 else None)
-        ax.set_ylabel("Temperatura al fondo (°C)")
-        ax.grid(True, axis="y")
-        ax.grid(False, axis="x")
-        loc = mdates.MonthLocator()
-        ax.xaxis.set_major_locator(loc)
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
-
-    def finish(fig, ax, ax2, title, note, path):
-        ax2.spines["right"].set_visible(True)
-        ax2.grid(False)
-        h1, l1 = ax.get_legend_handles_labels()
-        h2, l2 = ax2.get_legend_handles_labels()
-        ax.legend(h1 + h2, l1 + l2, loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3, fontsize=8.5)
-        ax.set_zorder(ax2.get_zorder() + 1)
-        ax.patch.set_visible(False)
-        ax.set_title(title)
-        ax.text(0.0, -0.30, note, color=MUTED, fontsize=8, transform=ax.transAxes, va="top")
-        _save(fig, path)
-
-    os.makedirs(fdir, exist_ok=True)
-    if wa is not None and "Hm0" in wa:
-        H = pd.Series(np.where(np.isin(wa.wave_qc.values, [1, 3]), wa.Hm0.values, np.nan),
-                      index=pd.DatetimeIndex(wa.time.values))
-        fig, ax = plt.subplots(figsize=(13, 5))
-        base(ax)
-        ax2 = ax.twinx()
-        ax2.plot(H.index, H.values, color=C_W, lw=0.9, alpha=0.85, label="Hm0 (flag 1-3)")
-        ax2.set_ylabel("Altezza d'onda significativa Hm0 (m)")
-        ax2.set_ylim(0, max(1.0, np.nanmax(H.values) * 1.15) if H.notna().any() else 1)
-        finish(fig, ax, ax2, "Temperatura al fondo e altezza d'onda significativa",
-               "Temperatura: media giornaliera delle medie orarie (giorni misti esclusi). Hm0: un valore per "
-               "burst d'onda. Assi y diversi: sinistra temperatura, destra Hm0.",
-               os.path.join(fdir, "temperatura_e_Hm0.png"))
-    if c is not None:
-        lo = np.argsort(c.z.values)[:n_bottom_cells]
-        ok = np.isin(c.vel_qc.values[:, lo], [1, 3])
-        with np.errstate(all="ignore"):
-            ub = np.nanmean(np.where(ok, c.u.values[:, lo], np.nan), axis=1)
-            vb = np.nanmean(np.where(ok, c.v.values[:, lo], np.nan), axis=1)
-        S = pd.Series(np.hypot(ub, vb), index=pd.DatetimeIndex(c.time.values))
-        Sd = S.resample("1D").mean()
-        zl = f"{c.z.values[lo].min():.1f}-{c.z.values[lo].max():.1f} m dal fondale"
-        fig, ax = plt.subplots(figsize=(13, 5))
-        base(ax)
-        ax2 = ax.twinx()
-        ax2.plot(S.index, S.values, color=C_C, lw=0.5, alpha=0.3, label=f"Corrente al fondo, medie orarie ({zl})")
-        ax2.plot(Sd.index + pd.Timedelta("12h"), Sd.values, color=C_C, lw=2, label="Corrente al fondo, media giornaliera")
-        ax2.set_ylabel("Intensità della corrente al fondo (m/s)")
-        if S.notna().any():
-            ax2.set_ylim(0, np.nanpercentile(S.values, 99.8) * 1.15)
-        finish(fig, ax, ax2, "Temperatura al fondo e corrente al fondo",
-               f"Corrente al fondo: intensità della media vettoriale delle {n_bottom_cells} celle più basse ({zl}), "
-               "solo celle con flag 1-3. Assi y diversi: sinistra temperatura, destra corrente.",
-               os.path.join(fdir, "temperatura_e_corrente_fondo.png"))
-
-    if c is not None and "water_depth" in c:
-        # corrente in superficie: le celle valide piu' alte, solo se entro surface_max_m dalla superficie
-        z = c.z.values
-        dist = c.water_depth.values[:, None] - z[None, :]
-        ok = np.isin(c.vel_qc.values, [1, 3]) & np.isfinite(c.u.values) & (dist <= surface_max_m)
-        us = np.full(c.sizes["time"], np.nan)
-        vs = us.copy()
-        dd = us.copy()
-        for i in range(len(us)):
-            idx = np.flatnonzero(ok[i])
-            if len(idx) >= n_surface_cells:
-                top = idx[np.argsort(z[idx])[-n_surface_cells:]]
-                us[i], vs[i] = c.u.values[i, top].mean(), c.v.values[i, top].mean()
-                dd[i] = dist[i, top].mean()
-        S = pd.Series(np.hypot(us, vs), index=pd.DatetimeIndex(c.time.values))
-        Sd = S.resample("1D").mean()
-        zl = (f"in mediana {np.nanmedian(dd):.1f} m sotto la superficie" if np.isfinite(dd).any() else "")
-        fig, ax = plt.subplots(figsize=(13, 5))
-        base(ax)
-        ax2 = ax.twinx()
-        ax2.plot(S.index, S.values, color=C_C, lw=0.5, alpha=0.3, label="Corrente in superficie, medie orarie")
-        ax2.plot(Sd.index + pd.Timedelta("12h"), Sd.values, color=C_C, lw=2,
-                 label="Corrente in superficie, media giornaliera")
-        ax2.set_ylabel("Intensità della corrente in superficie (m/s)")
-        if S.notna().any():
-            ax2.set_ylim(0, np.nanpercentile(S.values, 99.8) * 1.15)
-        finish(fig, ax, ax2, "Temperatura al fondo e corrente in superficie",
-               f"Corrente in superficie: intensità della media vettoriale delle {n_surface_cells} celle valide più alte "
-               f"(flag 1-3), solo se entro {surface_max_m:g} m dalla superficie ({zl}).\nAssi y diversi: sinistra "
-               "temperatura, destra corrente.", os.path.join(fdir, "temperatura_e_corrente_superficie.png"))
