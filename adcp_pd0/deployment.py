@@ -23,7 +23,7 @@ import pandas as pd
 def detect_deployment(reader, p_min: float = 1.0, tol_frac: float = 0.10, tol_min: float = 2.0,
                       tilt_max: float = 15.0, tilt_change_max: float = 3.0, min_stable_min: int = 30,
                       margin_min: float = 10.0, motion_heading_deg: float = 1.0,
-                      motion_tilt_deg: float = 0.3, motion_merge_min: float = 60.0,
+                      motion_tilt_deg: float = 0.3, motion_merge_min: float = 180.0,
                       verbose: bool = True) -> dict:
     t = reader.times()
     ds = reader.load(["pressure", "pitch", "roll", "heading"])
@@ -89,10 +89,12 @@ def detect_deployment(reader, p_min: float = 1.0, tol_frac: float = 0.10, tol_mi
     return res
 
 
-def motion_events(m, start, end, thr_heading=1.0, thr_tilt=0.3, merge_min=60.0, ctx=30):
+def motion_events(m, start, end, thr_heading=1.0, thr_tilt=0.3, merge_min=180.0, ctx=30):
     """Intervalli in cui il telaio si muove: salti di heading > ``thr_heading`` o di pitch/roll
     > ``thr_tilt`` fra minuti consecutivi con dati (le misure sono a burst, quindi due minuti
-    consecutivi possono distare decine di minuti). Intervalli vicini (< ``merge_min``) uniti."""
+    consecutivi possono distare decine di minuti). Intervalli vicini (< ``merge_min``) uniti:
+    con un burst all'ora due salti in ore consecutive distano circa 60 minuti e sono lo stesso
+    episodio. L'assetto "prima" e "dopo" usa solo i dati fra un episodio e l'altro."""
     mm = m[(m.index >= start) & (m.index < end)]
     if len(mm) < 2:
         return []
@@ -107,9 +109,11 @@ def motion_events(m, start, end, thr_heading=1.0, thr_tilt=0.3, merge_min=60.0, 
         else:
             ev.append([a, b])
     out = []
-    for a, b in ev:
-        before = mm[mm.index < a].tail(ctx)
-        after = mm[mm.index >= b].head(ctx)
+    for k, (a, b) in enumerate(ev):
+        lo = ev[k - 1][1] if k > 0 else mm.index[0]                  # fine dell'episodio precedente
+        hi = ev[k + 1][0] if k + 1 < len(ev) else mm.index[-1] + pd.Timedelta(minutes=1)
+        before = mm[(mm.index < a) & (mm.index >= lo)].tail(ctx)
+        after = mm[(mm.index >= b) & (mm.index < hi)].head(ctx)
         circ = lambda x: float(np.mod(np.degrees(np.arctan2(np.sin(np.deg2rad(x)).mean(),
                                                             np.cos(np.deg2rad(x)).mean())), 360)) if len(x) else np.nan
         out.append(dict(start=str(a), end=str(b),

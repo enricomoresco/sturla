@@ -595,3 +595,37 @@ def test_layers_and_qc_summary():
     q = ST.qc_summary(c)
     assert q["velocita"]["per_causa"]["contaminazione_superficie"] > 0
     assert q["posizione"]["per_flag"][4] == 5 and q["velocita"]["celle_utili_buone_pct"] == 100.0
+
+
+def test_motion_events_merge_and_net_rotation():
+    """Con un burst all'ora due salti in ore consecutive sono un solo episodio; la rotazione di una
+    mareggiata e' quella netta, non la somma dei salti."""
+    from adcp_pd0.deployment import motion_events
+    from adcp_pd0 import stats as ST
+    # minuti con dati: tre minuti per ora (HH:20-HH:22) per tre giorni, come i burst brevi del file reale
+    idx = pd.DatetimeIndex([pd.Timestamp("2026-08-20") + pd.Timedelta(hours=h, minutes=20 + k)
+                            for h in range(72) for k in range(3)])
+    hour = ((idx - idx[0]).total_seconds().values // 3600).astype(int)
+    # salti fra le 22 e le 23 e fra le 00 e le 01 (a 61 minuti l'uno dall'altro), poi un terzo il 22 agosto
+    head = np.select([hour <= 22, hour <= 24, hour <= 60], [319.5, 324.0, 329.0], default=331.5)
+    m = pd.DataFrame(dict(heading=head, pitch=1.0, roll=-3.0), index=idx)
+    end = idx[-1] + pd.Timedelta(minutes=1)
+    ev = motion_events(m, idx[0], end, ctx=200)
+    assert len(ev) == 2
+    assert ev[0]["start"] == "2026-08-20 22:22:00" and ev[0]["end"] == "2026-08-21 01:21:00"
+    # assetto prima e dopo senza i dati dell'altro episodio, anche con una finestra molto lunga
+    assert abs(ev[0]["heading_before"] - 319.5) < 1e-6 and abs(ev[0]["heading_after"] - 329.0) < 1e-6
+    assert abs(ev[1]["heading_before"] - 329.0) < 1e-6 and abs(ev[1]["heading_after"] - 331.5) < 1e-6
+    ev60 = motion_events(m, idx[0], end, merge_min=60.0, ctx=200)
+    assert len(ev60) == 3 and abs(ev60[0]["heading_after"] - 324.0) < 1e-6
+    # mareggiata dalle 18:00 del 20 alle 02:00 del 21: rotazione netta 329.0 - 319.5
+    hm = np.full(36, 0.3)
+    hm[9:14] = [1.2, 1.8, 1.9, 1.5, 1.1]
+    w = _fake_waves(hm, t0="2026-08-20")
+    for events in (ev, ev60):
+        st = ST.enrich_storms(ST.storms(w), None, None, dict(motion_events=events))
+        assert len(st) == 1 and bool(st.movimento_telaio.iloc[0])
+        assert abs(st.rotazione_heading.iloc[0] - 9.5) < 1e-6
+    mt = ST.motion_table(dict(motion_events=ev), w)
+    assert len(mt) == 2 and abs(mt.rotazione_heading.iloc[0] - 9.5) < 1e-6
+    assert abs(mt.Hm0_max_prima.iloc[0] - 1.9) < 1e-6

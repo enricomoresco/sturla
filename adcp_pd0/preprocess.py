@@ -249,6 +249,9 @@ def run(a) -> dict:
     if old:
         print(f"Nota: in {out} ci sono file di versioni precedenti non piu' usati, che si possono cancellare: "
               + ", ".join(old))
+    print(f"Controllare: metadati letti da {md_src}; altezza del trasduttore sul fondale {hab} m"
+          + (" (opzione --hab)" if a.hab is not None else "")
+          + f"; stazione {md.get('station_id')}. Se un valore e' sbagliato, correggere metadata.json e rilanciare.")
     print(f"Prossimo passo: python postprocessing.py -o {out}")
     return dict(id=did, dir=pre, files=written, errors=errors)
 

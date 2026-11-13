@@ -301,13 +301,15 @@ def enrich_storms(st: pd.DataFrame, layers=None, T=None, dep=None, pad_h=3.0) ->
             after = T[(T.index > b) & (T.index <= b + pd.Timedelta(hours=24))]
             if before.notna().any() and after.notna().any():
                 st.loc[i, "dT_fondo"] = float(after.mean() - before.mean())
-        for ev in (dep or {}).get("motion_events", []):
-            es, ee = pd.Timestamp(ev["start"]), pd.Timestamp(ev["end"])
-            if es <= b + pd.Timedelta(hours=pad_h) and ee >= a - pd.Timedelta(hours=pad_h):
-                st.loc[i, "movimento_telaio"] = True
-                dh = (float(ev.get("heading_after", np.nan)) - float(ev.get("heading_before", np.nan)) + 180) % 360 - 180
-                prev = st.loc[i, "rotazione_heading"]
-                st.loc[i, "rotazione_heading"] = dh if not np.isfinite(prev) else prev + dh
+        # rotazione netta: assetto dopo l'ultimo movimento della mareggiata meno quello prima del primo
+        hit = [ev for ev in (dep or {}).get("motion_events", [])
+               if pd.Timestamp(ev["start"]) <= b + pd.Timedelta(hours=pad_h)
+               and pd.Timestamp(ev["end"]) >= a - pd.Timedelta(hours=pad_h)]
+        if hit:
+            hit.sort(key=lambda ev: pd.Timestamp(ev["start"]))
+            st.loc[i, "movimento_telaio"] = True
+            h0, h1 = float(hit[0].get("heading_before", np.nan)), float(hit[-1].get("heading_after", np.nan))
+            st.loc[i, "rotazione_heading"] = (h1 - h0 + 180) % 360 - 180
     return st
 
 
