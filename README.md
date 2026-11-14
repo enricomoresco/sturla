@@ -54,6 +54,17 @@ tranne le serie dei burst). È il file da inviare per scrivere il report.
 `<ID>` è l'identificativo del deployment, `<stazione>_<inizio>_<fine>` del periodo in
 posizione (es. `STURLA_20260710_20261027`); la stazione viene da `metadata.json`.
 
+## Analisi del rimescolamento (dati esterni)
+
+`analisi/rimescolamento/` contiene l'analisi delle cause del rimescolamento di ottobre 2026. Usa i
+risultati dell'ADCP insieme a ERA5, al vento Copernicus Marine e al modello del Mediterraneo
+MedFS. Contiene anche gli script per scaricare questi dati da terminale. Istruzioni in
+[`analisi/rimescolamento/LEGGIMI.md`](analisi/rimescolamento/LEGGIMI.md).
+
+```bash
+python analisi/rimescolamento/esegui_tutto.py --dati dati_esterni --risultati out --uscita out_rimescolamento
+```
+
 ## Livelli dei dati e cartelle
 
 | livello | cosa | dove |
