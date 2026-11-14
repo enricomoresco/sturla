@@ -83,14 +83,14 @@ eventi. Per un altro deployment si cambiano lì.
     interno;
   - direttamente, con le correnti del modello (`trasporto_calore.py`): avvezione orizzontale e
     verticale della temperatura nei punti di griglia più vicini alla costa. Il resto del bilancio è
-    il mescolamento, più gli errori dovuti ai campi interpolati. Nello strato superficiale il resto
-    torna con il flusso di calore ERA5 entro circa il 10–30%.
+    il mescolamento, più gli errori dovuti ai campi interpolati. Controllo: il 18–22 ottobre il resto
+    dello strato 0–20 m vale −0.61 °C, contro −0.65 °C attesi dal raffreddamento ERA5.
 
 ## Limiti
 
 - **Vento.** Il vento disponibile è probabilmente debole sotto costa: per questo ci sono gli
   esperimenti con il vento ×1.5 e ×2.
-- **Punto del modello.** È 3–4 km al largo, su più di 56 m di fondale, e al fondo è più caldo di
+- **Punto del modello.** È 3–4 km al largo, su circa 90 m di fondale, e al fondo è più caldo di
   1–2 °C rispetto all'ADCP. Il modello 1D parte dal suo profilo.
 - **Coefficienti.** Le efficienze sono di letteratura, ricavate in altri mari.
 
