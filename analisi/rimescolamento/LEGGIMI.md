@@ -52,6 +52,7 @@ eventi. Per un altro deployment si cambiano lì.
 | `richardson.py` | numero di Richardson al termoclino, con il taglio misurato dall'ADCP | `richardson.csv` |
 | `acqua_bassa.py` | profilo della deriva di Stokes, trasporti di Stokes e di Ekman, corrente verso costa in mareggiata | `stokes_ekman.csv`, `corrente_verso_costa.csv` |
 | `trasporto_calore.py` | bilancio di temperatura nel modello vicino alla costa: tendenza = avvezione orizzontale + avvezione verticale (downwelling) + resto (mescolamento); facoltativo, serve il riquadro MedFS | `trasporto_calore.csv` |
+| `gotm_forzanti.py` | file di ingresso per GOTM: correnti orarie dell'ADCP da usare per il rilassamento, velocità verticale giornaliera di MedFS, profilo iniziale con il fondo freddo come misurato; da lanciare a parte | `gotm/*.dat`, `gotm/LEGGIMI_GOTM.md` |
 | `figure.py` | le figure del report (la quinta solo se c'è `trasporto_calore.csv`) | `figure/*.png` |
 
 `col1d.py` contiene il modello 1D, `comune.py` le impostazioni. I test del modello 1D sono in
