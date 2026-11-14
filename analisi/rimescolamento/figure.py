@@ -4,6 +4,7 @@
   2_energia_processi_locali.png      energia fornita dai processi locali in % di quella necessaria
   3_termoclino_modello_e_ADCP.png    quota del termoclino: modello contro stime dell'ADCP
   4_tempi_riscaldamento_fondo.png    riscaldamento al fondo: misura, modello 3D, modello 1D
+  5_bilancio_temperatura_strato_profondo.png   trasporto e mescolamento nello strato 22-34 m (se c'e' trasporto_calore.csv)
 """
 from __future__ import annotations
 
@@ -185,8 +186,35 @@ def figura_4(E, F, zm, tm, th, so, out):
     _save(fig, os.path.join(out, "figure", "4_tempi_riscaldamento_fondo.png"))
 
 
+def figura_5(D, out):
+    """Bilancio di temperatura dello strato 22-34 m vicino alla costa nel modello (trasporto_calore.py)."""
+    x = D[D.strato == "22-34 m"].set_index("finestra")
+    etich = {"21-22 agosto": "21–22 agosto", "4-7 ottobre, prima della mareggiata": "4–7 ottobre\nprima della mareggiata",
+             "7-9 ottobre, mareggiata": "7–9 ottobre\nmareggiata", "18-22 ottobre": "18–22 ottobre"}
+    termini = [("avvezione_verticale", "trasporto verticale (downwelling)", C1),
+               ("avvezione_orizzontale", "trasporto orizzontale", C2),
+               ("resto_mescolamento", "mescolamento (resto del bilancio)", C3)]
+    fig, ax = plt.subplots(figsize=(11.5, 4.8), layout="constrained")
+    ax.set_axisbelow(True)
+    xs = np.arange(len(x)); wb = 0.24
+    for k, (c, lab, col) in enumerate(termini):
+        ax.bar(xs + (k - 1) * wb, x[c].values, width=wb * 0.92, color=col, label=lab)
+    ax.plot(xs, x.tendenza.values, "D", ms=9, color=INK, mec=SURF, mew=1.5, label="variazione di temperatura", zorder=5)
+    for xi, v in zip(xs, x.tendenza.values):
+        ax.text(xi + 0.05, v + 0.08, f"{v:+.1f} °C", fontsize=9.5, color=INK)
+    ax.axhline(0, color=AXIS, lw=1)
+    ax.set_xticks(xs); ax.set_xticklabels([etich.get(i, i) for i in x.index])
+    ax.set_ylabel("°C nella finestra"); ax.grid(False, axis="x")
+    ax.legend(loc="upper right", ncols=2, fontsize=9, frameon=False)
+    fig.suptitle("Strato 22–34 m vicino alla costa nel modello: da dove viene il riscaldamento", x=0.01, ha="left", fontweight="bold")
+    _save(fig, os.path.join(out, "figure", "5_bilancio_temperatura_strato_profondo.png"))
+
+
 def main(argv=None):
     a = C.argomenti(__doc__, argv)
+    p5 = os.path.join(a.uscita, "trasporto_calore.csv")
+    if os.path.exists(p5):
+        figura_5(pd.read_csv(p5), a.uscita)
     F = C.leggi(a.uscita, "forzanti_orari.csv")
     m = C.leggi(a.uscita, "giornaliero_modello.csv")
     T = pd.read_csv(os.path.join(a.uscita, "contributi_finali.csv"), index_col=0)

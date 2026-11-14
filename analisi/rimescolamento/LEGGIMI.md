@@ -37,6 +37,7 @@ eventi. Per un altro deployment si cambiano lì.
 | `*flussi_ERA5*.nc` | ERA5, Copernicus Climate Data Store; orario, 0.25° | radiazione solare e infrarossa netta, calore latente e sensibile, evaporazione, pioggia |
 | `*vento*.nc` | Copernicus Marine, vento globale da scatterometri e modello (KNMI, prodotto 012_004); orario, 0.125° | vento a 10 m |
 | `*temperatura_3D*.nc`, `*salinita_3D*.nc`, `*mixed_layer_depth*.nc` | Copernicus Marine, modello MedFS (MEDSEA_ANALYSISFORECAST_PHY_006_013); orario, 1/24° | temperatura, salinità e profondità del mixed layer, fino a 56 m |
+| `medfs_riquadro_*.nc` (facoltativi, da `scarica_dati.sh`) | MedFS, riquadro 8.83–9.21 E, 44.23–44.48 N, 1–203 m | correnti e temperatura orarie, velocità verticale giornaliera, per `trasporto_calore.py` |
 
 ## Passi e uscite
 
@@ -50,7 +51,8 @@ eventi. Per un altro deployment si cambiano lì.
 | `circolazione.py` | correnti lungo costa e verso costa misurate negli eventi, trasporto di Ekman, abbassamento atteso del termoclino | `circolazione_profili.csv`, `downwelling.csv` |
 | `richardson.py` | numero di Richardson al termoclino, con il taglio misurato dall'ADCP | `richardson.csv` |
 | `acqua_bassa.py` | profilo della deriva di Stokes, trasporti di Stokes e di Ekman, corrente verso costa in mareggiata | `stokes_ekman.csv`, `corrente_verso_costa.csv` |
-| `figure.py` | le quattro figure del report | `figure/*.png` |
+| `trasporto_calore.py` | bilancio di temperatura nel modello vicino alla costa: tendenza = avvezione orizzontale + avvezione verticale (downwelling) + resto (mescolamento); facoltativo, serve il riquadro MedFS | `trasporto_calore.csv` |
+| `figure.py` | le figure del report (la quinta solo se c'è `trasporto_calore.csv`) | `figure/*.png` |
 
 `col1d.py` contiene il modello 1D, `comune.py` le impostazioni. I test del modello 1D sono in
 `tests/test_rimescolamento.py`.
@@ -74,11 +76,15 @@ eventi. Per un altro deployment si cambiano lì.
   penetra nella colonna. La convezione e l'energia dei processi sopra inglobano acqua nello strato
   mescolato dall'alto o dal fondo. Il costo del mescolamento usa l'equazione di stato
   linearizzata. Non c'è avvezione: la differenza con il modello 3D è il trasporto.
-- **Trasporto.** Si stima in due modi:
+- **Trasporto.** Si stima in tre modi:
   - bilancio di calore della colonna del modello: variazione del contenuto di calore meno flusso in
     superficie;
   - ordine di grandezza dal trasporto di Ekman verso costa, distribuito sul raggio di deformazione
-    interno.
+    interno;
+  - direttamente, con le correnti del modello (`trasporto_calore.py`): avvezione orizzontale e
+    verticale della temperatura nei punti di griglia più vicini alla costa. Il resto del bilancio è
+    il mescolamento, più gli errori dovuti ai campi interpolati. Nello strato superficiale il resto
+    torna con il flusso di calore ERA5 entro circa il 10–30%.
 
 ## Limiti
 
