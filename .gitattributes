@@ -1,0 +1,2 @@
+# gli script bash devono avere fine riga Unix anche se il repository e' clonato da Windows
+*.sh text eol=lf
