@@ -8,6 +8,8 @@ Scrive in <uscita>/gotm/:
                        suo massimo, per l'avvezione verticale imposta (prova dell'ipotesi B in 1D)
   init_ts_adcp.dat     profilo iniziale di temperatura e salinita' del modello, spostato verso l'alto
                        finche' la temperatura al sensore coincide con quella misurata dall'ADCP
+  ts_medfs_spostato.dat  profili orari di MedFS con lo stesso spostamento, per rilassare lo strato
+                       profondo (trasporto laterale)
   LEGGIMI_GOTM.md      come usarli
 
 Formato dei profili: per ogni istante una riga 'data ora N 1', poi N righe 'z valori' dal fondo
@@ -39,8 +41,9 @@ Prodotti da `analisi/rimescolamento/gotm_forzanti.py`.
 | File | Contenuto | Uso in GOTM |
 |---|---|---|
 | `velprof_adcp.dat` | profili orari di u, v misurati (m/s), {nvel} quote fra {zmin:.1f} e {zmax:.1f} m | rilassamento delle velocità ai profili osservati (sezione delle velocità osservate, colonne 1 = u e 2 = v, con un tempo di rilassamento di 1–6 ore) |
-| `w_medfs.dat` | velocità verticale giornaliera di MedFS (m/s, positiva verso l'alto) e profondità del suo massimo (m, negativa) | avvezione verticale imposta: GOTM usa un profilo triangolare, nullo in superficie e al fondo, con il massimo alla quota indicata |
+| `w_medfs.dat` | velocità verticale giornaliera di MedFS (m/s, positiva verso l'alto) e quota del suo massimo come coordinata z (m, negativa sotto la superficie, non altezza sul fondo) | avvezione verticale imposta (`mimic_3d/w/max` colonna 1, `height` colonna 2): GOTM usa un profilo triangolare, nullo in superficie e al fondo, con il massimo alla quota indicata |
 | `init_ts_adcp.dat` | profilo iniziale di MedFS spostato verso l'alto di {shift:.1f} m, così al sensore vale {tadcp:.2f} °C come misurato | profilo iniziale di temperatura (colonna 1) e salinità (colonna 2) |
+| `ts_medfs_spostato.dat` | profili orari di MedFS con lo stesso spostamento di {shift:.1f} m | rilassamento della temperatura e della salinità nello strato vicino al fondo (`relax: h_b`, `tau_b`, per esempio 20 m e 1 giorno): rappresenta il trasporto laterale, che in 1D la sola velocità verticale non può portare fino al fondo |
 
 I nomi esatti delle chiavi nel file yaml dipendono dalla versione di GOTM: il modo sicuro è
 generare il file completo con `gotm --write_yaml gotm_completo.yaml --detail full` e cercarvi le
@@ -118,6 +121,12 @@ def main(argv=None):
     Tn = np.interp(np.minimum(zg + shift, zm[-1]), zm, Tp); Sn = np.interp(np.minimum(zg + shift, zm[-1]), zm, Sp)
     with open(os.path.join(out, "init_ts_adcp.dat"), "w") as f:
         _blocco(f, ti0, -zg, [Tn, Sn])
+    # 4. profili orari di MedFS con lo stesso spostamento, per rilassare lo strato profondo:
+    #    rappresentano il trasporto laterale (in 1D la velocita' verticale si annulla al fondo)
+    with open(os.path.join(out, "ts_medfs_spostato.dat"), "w") as f:
+        for i in np.where((tm >= t0) & (tm <= t1))[0]:
+            zz_ = np.minimum(zg + shift, zm[-1])
+            _blocco(f, tm[i], -zg, [np.interp(zz_, zm, th[i]), np.interp(zz_, zm, so[i])])
 
     with open(os.path.join(out, "LEGGIMI_GOTM.md"), "w") as f:
         f.write(LEGGIMI.format(nvel=len(zv), zmin=zv.min(), zmax=zv.max(), shift=shift, tadcp=tadcp))
