@@ -1,10 +1,12 @@
 """Impostazioni e funzioni comuni dell'analisi del rimescolamento alla stazione di Sturla.
 
-Tutti gli script di questa cartella accettano gli stessi tre argomenti:
+Tutti gli script di questa cartella accettano gli stessi argomenti:
 
   --dati        cartella con i file esterni (ERA5, vento CMEMS, modello MedFS)
   --risultati   cartella dei risultati dell'ADCP (con dentro preprocessing/ e postprocessing/)
   --uscita      cartella dove scrivere tabelle e figure (default: out_rimescolamento)
+  --gotm        cartella delle run GOTM e dei loro file di ingresso (serve solo agli script gotm_*
+                e a confronti_esterni.py)
 
 I valori legati alla stazione e al periodo sono qui sotto: per un altro deployment vanno
 cambiati qui.
@@ -60,6 +62,8 @@ def argomenti(descrizione: str, argv=None) -> argparse.Namespace:
     ap.add_argument("--dati", required=True, help="cartella con i file esterni (ERA5, vento, MedFS)")
     ap.add_argument("--risultati", required=True, help="cartella dei risultati ADCP (preprocessing/, postprocessing/)")
     ap.add_argument("--uscita", default="out_rimescolamento", help="cartella di uscita")
+    ap.add_argument("--gotm", default=None,
+                    help="cartella delle run GOTM (cartelle dei casi con gotm.yaml e sturla.nc, e data/)")
     a = ap.parse_args(argv)
     os.makedirs(os.path.join(a.uscita, "figure"), exist_ok=True)
     return a
@@ -69,6 +73,8 @@ def trova(cartella: str, chiave: str) -> str:
     """Percorso del file esterno indicato da `chiave` (vedi FILE) o di un file dei risultati."""
     pat = FILE.get(chiave, chiave)
     hit = sorted(glob.glob(os.path.join(cartella, pat))) or sorted(glob.glob(os.path.join(cartella, "**", pat), recursive=True))
+    if chiave == "vento":       # il vento ERA5 di scarica_era5.py ha 'vento' nel nome: non e' il vento CMEMS
+        hit = [h for h in hit if "era5" not in os.path.basename(h).lower()]
     if not hit:
         raise FileNotFoundError(f"nessun file '{pat}' in {cartella}")
     if len(hit) > 1:
@@ -122,3 +128,38 @@ def leggi(uscita: str, nome: str, **kw) -> pd.DataFrame:
     if not os.path.exists(p):
         raise FileNotFoundError(f"{p} non esiste: lanciare prima il passo che lo produce (vedi esegui_tutto.py)")
     return pd.read_csv(p, index_col=0, parse_dates=True, **kw)
+
+
+def era5_vento(dati: str) -> pd.DataFrame:
+    """Vento a 10 m (u10, v10, m/s), pressione al livello del mare (msl, hPa) e sforzo del vento
+    (tx, ty, N/m2) orari di ERA5 nel punto PUNTO_ERA5, come scaricati da scarica_era5.py.
+
+    Il Climate Data Store puo' consegnare un file solo o due file separati ('...stepType-instant.nc'
+    con vento e pressione, '...stepType-avg.nc' con lo sforzo): si cercano entrambi i casi fra i file
+    NetCDF di `dati` con 'era5' o 'steptype' nel nome. L'indice e' l'istante indicato da ERA5:
+    vento e pressione sono istantanei, lo sforzo e' la media sull'ora che finisce a quell'istante
+    (per centrarlo si usa sforzo_era5_centrato)."""
+    nomi = {"u10": "u10", "v10": "v10", "msl": "msl", "avg_iews": "tx", "avg_inss": "ty"}
+    serie = {}
+    for p in sorted(glob.glob(os.path.join(dati, "**", "*.nc"), recursive=True)):
+        nome = os.path.basename(p).lower()
+        if "era5" not in nome and "steptype" not in nome:
+            continue
+        with xr.open_dataset(p) as d:
+            for v, k in nomi.items():
+                if v in d and k not in serie:
+                    s = d[v].sel(**PUNTO_ERA5, method="nearest").to_series()
+                    s.index = pd.DatetimeIndex(s.index)
+                    serie[k] = s / 100.0 if v == "msl" else s
+    manca = [k for k in nomi.values() if k not in serie]
+    if manca:
+        raise FileNotFoundError(f"vento ERA5 non trovato in {dati} (mancano {', '.join(manca)}): scaricarlo con "
+                                "scarica_era5.py; se il file scaricato e' uno zip, estrarlo nella stessa cartella")
+    return pd.DataFrame({k: serie[k] for k in nomi.values()})
+
+
+def sforzo_era5_centrato(E: pd.DataFrame) -> pd.DataFrame:
+    """Sforzo ERA5 riportato a meta' dell'ora su cui e' mediato (30 minuti prima dell'istante indicato)."""
+    s = E[["tx", "ty"]].dropna().copy()
+    s.index = s.index - pd.Timedelta("30min")
+    return s
