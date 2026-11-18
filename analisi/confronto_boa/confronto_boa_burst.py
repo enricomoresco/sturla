@@ -6,7 +6,9 @@ Mettere nella stessa cartella:
     oppure waveburst.nc): servono le variabili eta, n_samples e sample_time;
   - il CSV della boa, con le colonne UTC, Hs (m), Tp (sec), Ta (sec), Dd (deg) (e lat, lon);
   - facoltativo: il livello del mare di MedFS (un NetCDF con la variabile zos), per controllare
-    l'orologio dell'ADCP anche con la marea.
+    l'orologio dell'ADCP anche con la marea;
+  - facoltativo: il deployment.json della cartella preprocessing/ della stessa elaborazione (anche in una
+    sottocartella), per segnare i movimenti del telaio al minuto; senza, si usano i burst segnati.
 
   python confronto_boa_burst.py [cartella] [--sposta-adcp-ore ORE]
 
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import re
 import sys
@@ -167,6 +170,9 @@ def parametri_onde(b: xr.Dataset) -> pd.DataFrame:
     dok = np.isfinite(w.Dp.values)
     sospetta = mot | (np.nan_to_num(w.Hm0.values) < HM0_DIR_MIN) | (np.nan_to_num(w.coerenza.values, nan=1.0) < COH_MIN)
     w["direction_qc"] = np.select([~inpos, ~dok, sospetta], [4, 9, 3], 1)
+    w["platform_motion"] = mot.astype(int)
+    w["in_position"] = inpos.astype(int)
+    w["heading"] = b["heading"].values if "heading" in b else np.nan
     w.attrs.update(nperseg=nseg, fs=fs, livello_direzione=lev,
                    quota_direzione=float(b["level_range"].values[lev]) if nlev else np.nan)
     return w
@@ -286,6 +292,47 @@ def mareggiate(w, b, sposta_h) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
+# ------------------------------------------------------------------ 10. (segue) movimenti del telaio
+def movimenti_telaio(cartella: Path, w_all: pd.DataFrame, attrs: dict, sposta_h: float) -> pd.DataFrame:
+    """Episodi di movimento del telaio, in UTC. Se nella cartella c'e' il deployment.json della stessa elaborazione
+    dei burst: episodi al minuto e rotazione dell'heading. Altrimenti: burst segnati con platform_motion, uniti se a
+    meno di 6 ore, e rotazione dall'heading medio dei burst fermi subito prima e subito dopo."""
+    for p in sorted(cartella.rglob("deployment.json")):
+        try:
+            dep = json.loads(p.read_text(encoding="utf-8"))
+            ev = dep.get("motion_events") or []
+            ore = 0.0
+            if attrs.get("deployment_start"):    # stesso deployment, al piu' con l'orologio diverso di ore intere
+                ore = (pd.Timestamp(attrs["deployment_start"]) - pd.Timestamp(dep["start"])) / pd.Timedelta("1h")
+            dsh = pd.Timedelta(hours=round(ore) + sposta_h)
+            mov = pd.DataFrame([dict(inizio=pd.Timestamp(e["start"]) + dsh, fine=pd.Timestamp(e["end"]) + dsh,
+                                     rotazione=(e["heading_after"] - e["heading_before"] + 180) % 360 - 180,
+                                     fonte=f"{p.relative_to(cartella)}, al minuto") for e in ev])
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+        dentro = w_all.index.min() + pd.Timedelta(hours=sposta_h) - pd.Timedelta("1D"), \
+            w_all.index.max() + pd.Timedelta(hours=sposta_h) + pd.Timedelta("1D")
+        if (ev and abs(ore - round(ore)) < 0.02 and abs(ore) <= 14
+                and mov.inizio.between(*dentro).all() and mov.fine.between(*dentro).all()):
+            return mov
+    if "platform_motion" not in w_all or not w_all.platform_motion.astype(bool).any():
+        return pd.DataFrame()
+    mot = w_all.platform_motion.to_numpy().astype(bool)
+    hd = w_all.heading.to_numpy(float)
+    fermo = w_all.in_position.to_numpy().astype(bool) & ~mot & np.isfinite(hd)
+    t0 = (w_all.index + pd.Timedelta(hours=sposta_h)).to_numpy()
+    t1 = t0 + 2 * (w_all.centro.to_numpy() - w_all.index.to_numpy())
+    idx = np.flatnonzero(mot)
+    passo = np.median(np.diff(w_all.index.values)) / np.timedelta64(1, "h") if len(w_all) > 1 else np.nan
+    righe = []
+    for g in np.split(idx, np.flatnonzero(np.diff(t0[idx]) > np.timedelta64(6, "h")) + 1):
+        prima, dopo = np.flatnonzero(fermo[:g[0]]), np.flatnonzero(fermo[g[-1] + 1:])
+        rot = (hd[g[-1] + 1 + dopo[0]] - hd[prima[-1]] + 180) % 360 - 180 if len(prima) and len(dopo) else np.nan
+        righe.append(dict(inizio=pd.Timestamp(t0[g[0]]), fine=pd.Timestamp(t1[g[-1]]), rotazione=rot,
+                          fonte=f"burst segnati con platform_motion, uno ogni {passo:.3g} ore"))
+    return pd.DataFrame(righe)
+
+
 # ------------------------------------------------------------------ 11. marea (facoltativo)
 def fasi_marea(w, sposta_h, medfs_path, lat, lon) -> pd.DataFrame | None:
     """Fasi di M2, S2, N2, K1, O1 nel livello dell'ADCP (pressione media dei burst) e in MedFS, con lo
@@ -346,25 +393,59 @@ def _con_buchi(s, ore=6):
     return pd.concat([s, buchi]).sort_index()
 
 
-def figura_onde(P, b, w, sposta, M, path):
-    fig = plt.figure(figsize=(13.5, 9.6), layout="constrained")
-    gs = fig.add_gridspec(2, 3, height_ratios=[1, 1.15])
-    ax = fig.add_subplot(gs[0, :])
+def figura_altezza(P, b, w, sposta, M, mov, path):
+    """Serie temporale: Hs della boa e Hm0 dell'ADCP, mareggiate, movimenti del telaio; sotto, il rapporto."""
+    fig, (ax, ax2) = plt.subplots(2, 1, figsize=(15, 7.4), sharex=True, layout="constrained",
+                                  gridspec_kw=dict(height_ratios=[3, 1.3]))
     lo, hi = P.index.min() - pd.Timedelta("12h"), P.index.max() + pd.Timedelta("12h")
     for _, r in M.iterrows():
-        ax.axvspan(r.inizio, r.fine, color=GRID, alpha=0.55, lw=0, zorder=0)
+        for a_ in (ax, ax2):
+            a_.axvspan(r.inizio, r.fine, color=GRID, alpha=0.6, lw=0, zorder=0)
     y = _con_buchi(b.Hs[lo:hi])
-    ax.plot(y.index, y.values, color=C2, lw=1.1, label="boa, Hs")
-    Wu = w[w.wave_qc.isin([1, 3])].set_index(w.centro[w.wave_qc.isin([1, 3])] + pd.Timedelta(hours=sposta)).Hm0
+    Wu = w.set_index(w.centro + pd.Timedelta(hours=sposta)).Hm0.sort_index()
     x = _con_buchi(Wu[lo:hi])
-    ax.plot(x.index, x.values, color=C1, lw=1.1, label=f"ADCP, Hm0 dai burst (tempi spostati di {sposta:+g} h, in UTC)")
-    ax.set_xlim(lo, hi)
-    ax.set_ylim(0, None)
-    ax.set_ylabel("altezza d'onda significativa (m)")
-    ax.legend(loc="upper left", fontsize=9)
-    ax.set_title(f"Altezza d'onda: boa e ADCP; in grigio Hs della boa sopra {SOGLIA_MAREGGIATA:g} m", loc="left")
-    _asse_tempo(ax)
-    ax = fig.add_subplot(gs[1, 0])
+    l1, = ax.plot(y.index, y.values, color=C2, lw=1.1, label="boa, Hs")
+    l2, = ax.plot(x.index, x.values, color=C1, lw=1.1,
+                  label="ADCP, Hm0 dai burst" + (f" (tempi del file spostati di {sposta:+g} h)" if sposta else ""))
+    ymax = float(max(np.nanmax(y.values), np.nanmax(x.values))) * 1.22
+    maniglie = [l1, l2]
+    if mov is not None and not mov.empty:
+        mv = mov.assign(tm=mov.inizio + (mov.fine - mov.inizio) / 2).sort_values("tm")
+        mv = mv[(mv.tm >= lo) & (mv.tm <= hi)].reset_index(drop=True)
+        vicino = pd.Timedelta("4D")                 # etichette di episodi vicini: la prima a sinistra della linea
+        for i, r in mv.iterrows():
+            for a_ in (ax, ax2):
+                a_.axvline(r.tm, color=C3, lw=1.4, ls="--", zorder=1)
+            col_prec = i > 0 and r.tm - mv.tm[i - 1] < vicino
+            col_succ = i + 1 < len(mv) and mv.tm[i + 1] - r.tm < vicino
+            testo = f"{r.rotazione:+.1f}°" if np.isfinite(r.rotazione) else "telaio"
+            a_sinistra = col_succ and not col_prec
+            ax.text(r.tm, ymax * (0.985 - 0.085 * col_prec), testo + " " if a_sinistra else " " + testo, color=C3,
+                    fontsize=9, va="top", ha="right" if a_sinistra else "left", fontweight="bold")
+        maniglie.append(plt.Line2D([], [], color=C3, lw=1.4, ls="--", label="movimento del telaio, con la rotazione dell'heading"))
+    if not M.empty:
+        maniglie.append(plt.Rectangle((0, 0), 1, 1, color=GRID, alpha=0.6, label=f"Hs della boa sopra {SOGLIA_MAREGGIATA:g} m"))
+    ax.set(xlim=(lo, hi), ylim=(0, ymax), ylabel="altezza d'onda significativa (m)")
+    ax.legend(handles=maniglie, loc="lower left", fontsize=9, ncols=len(maniglie), bbox_to_anchor=(0, 1.0),
+              borderaxespad=0.2, handlelength=2.2)
+    fig.suptitle("Altezza d'onda significativa: boa e ADCP (tempi in UTC)", x=0.01, ha="left",
+                 fontweight="bold", fontsize=12)
+    rap = (P.Hm0 / P.Hs_boa).sort_index()
+    ax2.scatter(rap.index, rap.values, s=7, color=C1, alpha=0.45, lw=0)
+    med = _con_buchi(rap.rolling("3D", center=True, min_periods=5).median(), ore=12)
+    ax2.plot(med.index, med.values, color=INK, lw=1.5, label="mediana mobile su 3 giorni")
+    ax2.axhline(1, color=AXIS, lw=1)
+    ax2.set(ylim=(0, 1.6), ylabel="Hm0 ADCP / Hs boa")
+    ax2.legend(loc="upper left", fontsize=8.5)
+    ax2.set_title("Rapporto fra ADCP e boa in ogni coppia (1 = stessa altezza)", loc="left")
+    _asse_tempo(ax2)
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+
+def figura_onde(P, path):
+    fig, axs = plt.subplots(1, 3, figsize=(13.5, 5.0), layout="constrained")
+    ax = axs[0]
     ax.scatter(P.Hs_boa, P.Hm0, s=10, color=C1, alpha=0.45, lw=0)
     lim = max(P.Hs_boa.max(), P.Hm0.max()) * 1.05
     ax.plot([0, lim], [0, lim], color=AXIS, lw=1)
@@ -378,7 +459,7 @@ def figura_onde(P, b, w, sposta, M, path):
     ax.set(xlim=(0, lim), ylim=(0, lim), xlabel="Hs boa (m)", ylabel="Hm0 ADCP (m)", aspect="equal")
     ax.legend(loc="lower right", fontsize=8.5)
     ax.set_title("Altezza", loc="left")
-    ax = fig.add_subplot(gs[1, 1])
+    ax = axs[1]
     mf = P.Hs_boa >= 0.5
     ax.scatter(P.Ta_boa[~mf], P.Tm01[~mf], s=8, color=MUTED, alpha=0.35, lw=0, label="Hs boa < 0.5 m")
     ax.scatter(P.Ta_boa[mf], P.Tm01[mf], s=10, color=C1, alpha=0.6, lw=0, label="Hs boa ≥ 0.5 m")
@@ -390,7 +471,7 @@ def figura_onde(P, b, w, sposta, M, path):
     ax.set(xlim=(2, 9), ylim=(2, 9), xlabel="Ta boa (s)", ylabel="Tm01 ADCP (s)", aspect="equal")
     ax.legend(loc="lower right", fontsize=8.5)
     ax.set_title("Periodo medio", loc="left")
-    ax = fig.add_subplot(gs[1, 2])
+    ax = axs[2]
     m = (P.direction_qc == 1) & (P.Hm0 >= 0.5)
     ax.scatter(P.Dd_boa[m], P.Dp[m], s=12, color=C3, alpha=0.6, lw=0)
     ax.plot([140, 280], [140, 280], color=AXIS, lw=1)
@@ -449,6 +530,13 @@ def main(argv=None):
                     help="ore da sommare ai tempi dei burst per averli in UTC (default: dal file, altrimenti stimate)")
     a = ap.parse_args(argv)
     cartella = Path(a.cartella).resolve()
+    f_burst, f_boa, f_medfs = trova_file(cartella)
+    b_nc = xr.load_dataset(f_burst)
+    confronta(cartella, f_burst.name, parametri_onde(b_nc), dict(b_nc.attrs), f_boa, f_medfs, a.sposta_adcp_ore)
+
+
+def confronta(cartella: Path, nome_burst, w_all, attrs, f_boa, f_medfs, sposta_scelto=None):
+    """Passi 5-12 a partire dai parametri d'onda di tutti i burst."""
     uscita = cartella / "confronto_boa_burst"
     (uscita / "figure").mkdir(parents=True, exist_ok=True)
     righe = []
@@ -457,15 +545,12 @@ def main(argv=None):
         print(s)
         righe.append(s)
 
-    f_burst, f_boa, f_medfs = trova_file(cartella)
-    dire(f"burst: {f_burst.name}\nboa: {f_boa.name}\nlivello MedFS: {f_medfs.name if f_medfs else 'assente (niente controllo con la marea)'}")
-    b_nc = xr.load_dataset(f_burst)
-    w = parametri_onde(b_nc)
-    w.to_csv(uscita / "parametri_onde_adcp.csv")
-    ok = w.wave_qc.isin([1, 3])
-    dire(f"{len(w)} burst, {int(ok.sum())} usabili (flag 1 o 3); spettri di {w.attrs['nperseg']} campioni a "
-         f"{w.attrs['fs']:g} Hz; direzione alla cella a {w.attrs['quota_direzione']:.1f} m dal trasduttore")
-    w = w[ok & np.isfinite(w.Hm0)].copy()
+    dire(f"burst: {nome_burst}\nboa: {f_boa.name}\nlivello MedFS: {f_medfs.name if f_medfs else 'assente (niente controllo con la marea)'}")
+    w_all.to_csv(uscita / "parametri_onde_adcp.csv")
+    ok = w_all.wave_qc.isin([1, 3])
+    dire(f"{len(w_all)} burst, {int(ok.sum())} usabili (flag 1 o 3); spettri di {w_all.attrs.get('nperseg')} campioni a "
+         f"{w_all.attrs.get('fs', np.nan):g} Hz; direzione alla cella a {w_all.attrs.get('quota_direzione', np.nan):.1f} m dal trasduttore")
+    w = w_all[ok & np.isfinite(w_all.Hm0)].copy()
     b = leggi_boa(f_boa)
     pos = f", posizione mediana {b.lat.median():.5f} N {b.lon.median():.5f} E" if "lat" in b else ""
     dire(f"boa: {len(b)} dati dal {b.index[0]} al {b.index[-1]}{pos}")
@@ -473,8 +558,8 @@ def main(argv=None):
     C = correlazione_sfasamenti(w, b)
     C.to_csv(uscita / "correlazione_sfasamenti.csv", index=False)
     best = C.loc[C.r.idxmax()]
-    sposta, motivo = (a.sposta_adcp_ore, "scelto con --sposta-adcp-ore") if a.sposta_adcp_ore is not None \
-        else orologio_dal_file(b_nc.attrs)
+    sposta, motivo = (sposta_scelto, "scelto con --sposta-adcp-ore") if sposta_scelto is not None \
+        else orologio_dal_file(attrs)
     if sposta is None:
         sposta = float(np.round(best.sposta_h))
         motivo += f"; uso lo spostamento intero che rende massima la correlazione, {sposta:+g} h"
@@ -494,6 +579,9 @@ def main(argv=None):
             dire((T[["A_cm_adcp", "A_cm_medfs", "dfase", "ritardo_h", "incertezza_h"]].astype(float).round(2)).to_string())
 
     P = accoppia(w, b, sposta)
+    if P.empty:
+        raise SystemExit(f"nessun burst ha un dato della boa entro {TOLLERANZA_MIN} minuti: controllare che i due "
+                         "file coprano lo stesso periodo e lo spostamento dell'orologio")
     P.to_csv(uscita / "coppie.csv")
     S = tabella_statistiche(P)
     S.to_csv(uscita / "statistiche.csv", index=False)
@@ -504,8 +592,14 @@ def main(argv=None):
         M.to_csv(uscita / "mareggiate.csv", index=False)
         dire("\nmareggiate (Hs della boa oltre la soglia):")
         dire(M.to_string(index=False, float_format=lambda x: f"{x:.2f}"))
+    mov = movimenti_telaio(cartella, w_all, attrs, sposta)
+    if not mov.empty:
+        mov.to_csv(uscita / "movimenti_telaio.csv", index=False)
+        dire(f"\nmovimenti del telaio ({mov.fonte.iloc[0]}):")
+        dire(mov.drop(columns="fonte").to_string(index=False, float_format=lambda x: f"{x:+.1f}"))
 
-    figura_onde(P, b, w, sposta, M, uscita / "figure" / "onde_adcp_boa.png")
+    figura_altezza(P, b, w, sposta, M, mov, uscita / "figure" / "altezza_adcp_boa.png")
+    figura_onde(P, uscita / "figure" / "onde_adcp_boa.png")
     figura_orologio(C, T, sposta, uscita / "figure" / "orologio_adcp.png")
     (uscita / "riepilogo.txt").write_text("\n".join(righe) + "\n", encoding="utf-8")
     print(f"\nrisultati in {uscita}")

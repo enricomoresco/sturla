@@ -36,7 +36,9 @@ confronta con la boa. Si mette lo script nella cartella con il file dei burst de
 (`<ID>_L2_wave_bursts.nc`, anche rinominato `waveburst.nc`) e il CSV della boa, e si lancia
 `python confronto_boa_burst.py` (oppure `python confronto_boa_burst.py <cartella>`). Risultati in
 `<cartella>/confronto_boa_burst/`. Su un file sintetico dà gli stessi Hm0, periodi e direzioni del
-post-processing (differenze sotto 1e-6).
+post-processing (differenze sotto 1e-6). Se nella cartella (o in una sottocartella) c'è anche il
+`deployment.json` di `preprocessing/` della stessa elaborazione, i movimenti del telaio sono segnati al
+minuto; altrimenti si ricavano dai burst segnati con `platform_motion`.
 
 1. **File.** Il NetCDF con `eta` e `n_samples` (preferito se il nome contiene «wave burst»), il CSV con le
    colonne `UTC` e `Hs (m)`, e se c'è un NetCDF con `zos` (livello di MedFS).
@@ -65,12 +67,21 @@ post-processing (differenze sotto 1e-6).
    (scarto / media della boa), correlazione, mediana del rapporto ADCP/boa: Hm0 contro Hs, in tutto e per
    classi di Hs; con Hs della boa ≥ 0.5 m, Tm01 e Tm02 contro Ta e Tp contro Tp (anche la quota entro 1 s);
    Dp − Dd riportata fra −180° e 180°: media, deviazione standard, quota entro 20°.
-10. **Mareggiate.** Tratti con Hs della boa ≥ 1.5 m mentre misura l'ADCP (uniti se a meno di 12 ore):
-    massimo della boa, massimo dell'ADCP entro 6 ore, media dell'ADCP entro 90 minuti dal massimo della boa.
+10. **Mareggiate e movimenti del telaio.** Mareggiate: tratti con Hs della boa ≥ 1.5 m mentre misura
+    l'ADCP (uniti se a meno di 12 ore): massimo della boa, massimo dell'ADCP entro 6 ore, media dell'ADCP
+    entro 90 minuti dal massimo della boa. Movimenti del telaio: gli episodi di `motion_events` del
+    `deployment.json`, con rotazione = heading dopo − heading prima, riportata fra −180° e 180°. Il file si
+    usa se il suo inizio del deployment coincide con `deployment_start` del file dei burst, o ne differisce
+    di ore intere (orologio diverso, e allora si corregge), e se gli episodi cadono nel periodo dei burst;
+    i tempi si spostano come quelli dei burst. Senza `deployment.json`: burst con `platform_motion` = 1,
+    uniti se a meno di 6 ore; rotazione dall'heading dei burst fermi subito prima e subito dopo. Questi
+    segnano solo i movimenti che cadono durante un burst, con la risoluzione dell'intervallo fra i burst.
 11. **Marea (facoltativa).** Livello dell'ADCP = profondità media del sensore in ogni burst; MedFS nel punto
     valido più vicino alla boa; nel periodo comune, fit ai minimi quadrati di costante, tendenza e coseno e
     seno di M2, S2, N2, K1 e O1, uguale per le due serie; ritardo = differenza di fase / velocità angolare.
     L'incertezza viene dagli errori standard del fit e suppone rumore bianco: è indicativa.
-12. **Uscite.** `figure/onde_adcp_boa.png`, `figure/orologio_adcp.png`, `parametri_onde_adcp.csv`,
-    `correlazione_sfasamenti.csv`, `coppie.csv`, `statistiche.csv`, `mareggiate.csv`, `fasi_marea.csv`,
-    `riepilogo.txt`.
+12. **Uscite.** `figure/altezza_adcp_boa.png` (Hs della boa e Hm0 dell'ADCP nel tempo, con mareggiate e
+    movimenti del telaio, e sotto il rapporto ADCP/boa di ogni coppia con la mediana mobile su 3 giorni),
+    `figure/onde_adcp_boa.png` (dispersioni di altezza, periodo medio e direzione),
+    `figure/orologio_adcp.png`, `parametri_onde_adcp.csv`, `correlazione_sfasamenti.csv`, `coppie.csv`,
+    `statistiche.csv`, `mareggiate.csv`, `movimenti_telaio.csv`, `fasi_marea.csv`, `riepilogo.txt`.
