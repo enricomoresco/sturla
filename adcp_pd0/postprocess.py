@@ -264,7 +264,8 @@ def run(a) -> dict:
                                  pressione_riferimento_dbar=dep.get("p_ref_dbar"))
     res["strumento"] = {k: _clean(v) for k, v in src.items()
                         if k.startswith("instrument") or k in ("station_id", "geospatial_lat_min", "geospatial_lon_min",
-                                                               "time_zone", "source_file")}
+                                                               "time_zone", "instrument_clock",
+                                                               "time_offset_applied_h", "source_file")}
     spec = bands = pa = None
     if layers is not None:
         def _cur():

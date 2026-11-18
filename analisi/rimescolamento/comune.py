@@ -36,13 +36,13 @@ g, RHO0, CP, RHOA = 9.81, 1025.0, 3990.0, 1.22
 H = 34.5                                    # fondale alla stazione (m)
 ALTEZZA_SENSORE = 0.6                       # sensore di temperatura dell'ADCP sopra il fondale (m)
 PROF_SENSORE = H - ALTEZZA_SENSORE          # profondita' del sensore (m)
-LAT_STAZIONE = 44.38
+LAT_STAZIONE, LON_STAZIONE = 44.37805, 8.98032   # boa ondametrica ancorata sopra l'ADCP
 FCOR = 2 * 7.2921e-5 * np.sin(np.deg2rad(LAT_STAZIONE))
 PUNTO_MODELLO = dict(latitude=44.3542, longitude=9.0)    # punto MedFS a mare della stazione
 PUNTO_ERA5 = dict(latitude=44.25, longitude=9.0)         # la riga a 44.5 N e' terra
 VENTO_LAT, VENTO_LON = 44.3125, (8.9375, 9.0625)         # riga a mare del vento CMEMS: media dei due punti
 ASSE_COSTA, VERSO_COSTA = 281.0, 11.0       # gradi da nord: lungo costa (verso ONO) e verso costa
-PERIODO = ("2026-07-10", "2026-10-27 15:00")              # in posizione
+PERIODO = ("2026-07-09 22:00", "2026-10-27 13:00")        # in posizione, UTC (orologio dello strumento UTC+2)
 EVENTI = {"21-22 agosto": ("2026-08-19 12:00", "2026-08-23 12:00"),
           "5-9 ottobre": ("2026-10-04 12:00", "2026-10-09 12:00"),
           "19-22 ottobre": ("2026-10-18 12:00", "2026-10-22 12:00")}

@@ -160,15 +160,21 @@ def pick_stream(outdir: str, label: str, name: str | None = None) -> str | None:
 
 
 class StreamReader:
-    """Accesso lazy a uno stream convertito (molti file part) per finestre temporali."""
+    """Accesso lazy a uno stream convertito (molti file part) per finestre temporali.
 
-    def __init__(self, outdir: str, stream: str):
+    ``clock_offset_h``: ore di anticipo dell'orologio dello strumento sull'UTC. I file in ``raw/``
+    (L1) restano con l'orario dello strumento; il lettore restituisce tempi in UTC, e in UTC
+    sono anche gli estremi ``t0``/``t1`` di :meth:`load`."""
+
+    def __init__(self, outdir: str, stream: str, clock_offset_h: float = 0.0):
         self.dir = os.path.join(outdir, "raw", stream)
         self.files = sorted(glob.glob(os.path.join(self.dir, "*.nc")))
         if not self.files:
             raise FileNotFoundError(f"nessun dato per lo stream {stream} in {self.dir}")
+        self.clock_offset_h = float(clock_offset_h or 0.0)
+        self._shift = np.timedelta64(int(round(self.clock_offset_h * 3600e9)), "ns")
         self._ds = [xr.open_dataset(f, cache=False) for f in self.files]
-        self._t = [d.time.values for d in self._ds]
+        self._t = [d.time.values - self._shift for d in self._ds]
 
     @property
     def attrs(self) -> dict:
@@ -207,6 +213,8 @@ class StreamReader:
         _, iu = np.unique(ds.time.values, return_index=True)
         if len(iu) < ds.sizes["time"]:
             ds = ds.isel(time=iu)
+        if self._shift:
+            ds = ds.assign_coords(time=("time", ds.time.values - self._shift, dict(ds.time.attrs)))
         return ds
 
     def close(self):

@@ -23,8 +23,8 @@ import traceback
 
 import numpy as np
 
-from .archive import (TIME_ENC, _encoding, currents_archive, deployment_id, hourly_temperature,
-                      load_metadata, temperature_archive, wave_bursts_archive)
+from .archive import (TIME_ENC, _encoding, clock_attrs, currents_archive, deployment_id, hourly_temperature,
+                      instrument_clock_offset, load_metadata, temperature_archive, wave_bursts_archive)
 from .convert import StreamReader, convert_files, expand_inputs, load_inventory, pick_stream, print_inventory
 from .currents import average_pings, qc_currents
 from .deployment import get_deployment
@@ -101,7 +101,7 @@ def _aux_dataset(reader, max_points=200_000):
 def _currents(out, reader, cur_name, dep, a):
     if cur_name is not None:
         print(f"  stream {cur_name}: profili gia' mediati dallo strumento")
-        r = StreamReader(out, cur_name)
+        r = StreamReader(out, cur_name, clock_offset_h=reader.clock_offset_h)
         ds = r.load()
         r.close()
     else:
@@ -125,7 +125,10 @@ def run(a) -> dict:
     md, md_src = resolve_metadata(a.metadata, out)
     hab = a.hab if a.hab is not None else float(md.get("instrument_height_above_bed_m") or 0.6)
     md = dict(md, instrument_height_above_bed_m=hab)
+    clock_h, clock_txt = instrument_clock_offset(md)
     print(f"Metadati: {md_src}; altezza del trasduttore sul fondale: {hab} m")
+    print(f"Orologio dello strumento: {clock_txt}" + (f"; tutti i tempi vengono riportati in UTC ({-clock_h:+g} h)"
+                                                     if clock_h else ""))
     inv = ensure_converted(a.inputs, out, a.byte_range, a.riconverti)
     if not md.get("station_id"):
         md["station_id"] = station_from_files(inv) or "ADCP"
@@ -136,7 +139,8 @@ def run(a) -> dict:
     cur = pick_stream(out, "currents", a.currents_stream)
     if wav is None and cur is None:
         raise SystemExit("nessuno stream utilizzabile nei dati convertiti")
-    reader = StreamReader(out, wav or cur)
+    reader = StreamReader(out, wav or cur, clock_offset_h=clock_h)
+    mda = clock_attrs(md, clock_h, clock_txt)       # metadati dei prodotti (tempi in UTC)
 
     print("\nPeriodo in posizione:")
     dep = get_deployment(out, reader, start=a.start, end=a.end, redetect=True,
@@ -162,7 +166,7 @@ def run(a) -> dict:
     print("\nCorrenti:")
     try:
         qc = _currents(out, reader, cur, dep, a)
-        c = currents_archive(qc, md, hab)
+        c = currents_archive(qc, mda, hab)
         save(c, "L2_currents")
     except Exception:
         fail("correnti")
@@ -170,7 +174,7 @@ def run(a) -> dict:
     print("\nTemperatura oraria:")
     try:
         h = hourly_temperature(reader, dep, p_min=a.p_min)
-        save(temperature_archive(h, md, reader.attrs, dep), "L2_temperature", {"time_bnds": dict(TIME_ENC)})
+        save(temperature_archive(h, mda, reader.attrs, dep), "L2_temperature", {"time_bnds": dict(TIME_ENC)})
     except Exception:
         fail("temperatura")
 
@@ -183,7 +187,7 @@ def run(a) -> dict:
                                      use_vb=not a.no_vb, p_min=a.p_min, orientation=a.orientation,
                                      declination=a.declination, corr_min=a.corr_min,
                                      p_ref=(float(p_ref) - a.p_atm) if p_ref is not None else None)
-            b = wave_bursts_archive(bb, md, dep, p_min=a.p_min)
+            b = wave_bursts_archive(bb, mda, dep, p_min=a.p_min)
             ok = np.isin(b["burst_qc"].values, (1, 3))
             print(f"  {b.sizes['time']:,} burst, {int(ok.sum()):,} utilizzabili (flag 1 o 3)")
             save(b, "L2_wave_bursts")
@@ -226,7 +230,7 @@ def run(a) -> dict:
         written.append(os.path.join(pre, "LEGGIMI_DATI.md"))
     try:
         from .report import write_report
-        rep = write_report(os.path.join(pre, f"{did}_RAPPORTO_PREPROCESSING.md"), did, md, hab, inv, dep, chk,
+        rep = write_report(os.path.join(pre, f"{did}_RAPPORTO_PREPROCESSING.md"), did, mda, hab, inv, dep, chk,
                            c=c, b=b, h=h, files=list(written), reader=reader, p_atm=a.p_atm)
         written.append(rep)
     except Exception:
@@ -251,7 +255,9 @@ def run(a) -> dict:
               + ", ".join(old))
     print(f"Controllare: metadati letti da {md_src}; altezza del trasduttore sul fondale {hab} m"
           + (" (opzione --hab)" if a.hab is not None else "")
-          + f"; stazione {md.get('station_id')}. Se un valore e' sbagliato, correggere metadata.json e rilanciare.")
+          + f"; stazione {md.get('station_id')}; orologio dello strumento {clock_txt}"
+          + (" (tempi riportati in UTC)" if clock_h else "")
+          + ". Se un valore e' sbagliato, correggere metadata.json e rilanciare.")
     print(f"Prossimo passo: python postprocessing.py -o {out}")
     return dict(id=did, dir=pre, files=written, errors=errors)
 
@@ -269,8 +275,10 @@ def build_parser(prog: str = "preprocessing.py") -> argparse.ArgumentParser:
                    help="porzione di ogni file, INIZIO:FINE in %% o MB (es. 45%%:55%%) per prove veloci")
     p.add_argument("--riconverti", action="store_true", help="rilegge il PD0 anche se out/raw esiste gia'")
     g = p.add_argument_group("periodo in posizione (default: automatico)")
-    g.add_argument("--start", default=None, help="correzione manuale dell'inizio (es. 2026-07-10T00:00)")
-    g.add_argument("--end", default=None, help="correzione manuale della fine")
+    g.add_argument("--start", default=None,
+                   help="correzione manuale dell'inizio (es. 2026-07-10T00:00), in UTC se time_zone dei "
+                        "metadati indica un orologio non in UTC")
+    g.add_argument("--end", default=None, help="correzione manuale della fine (stesso orario di --start)")
     g = p.add_argument_group("correnti")
     g.add_argument("--currents-stream", default=None)
     g.add_argument("--avg-minutes", type=float, default=60,

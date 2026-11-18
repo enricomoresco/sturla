@@ -77,7 +77,7 @@ def main(argv=None):
     ax.set_ylabel("profondità dell'interfaccia (m)\n(linea in basso: fondale)")
     ax.legend(loc="upper right", fontsize=9, frameon=False, ncols=2)
     for x_ in axs:
-        x_.axvspan(pd.Timestamp("2026-10-08 10:00"), pd.Timestamp("2026-10-09 14:00"), color=GRID, alpha=0.6, lw=0,
+        x_.axvspan(pd.Timestamp("2026-10-08 08:00"), pd.Timestamp("2026-10-09 12:00"), color=GRID, alpha=0.6, lw=0,
                    zorder=0)
     axs[1].set_xlim(lo, hi)
     _fmt_time(axs[1])

@@ -7,8 +7,9 @@
 --risultati  cartella dei risultati dell'ADCP (serve postprocessing/tabelle/onde_parametri.csv)
 --dati       facoltativo: cartella con il livello del riquadro MedFS (scarica_dati.sh), per il controllo
              dell'orologio con le fasi di marea (serve UTide)
---sposta-adcp-ore  ore da sommare ai tempi dell'ADCP per portarli in UTC; senza, si usa lo
-             spostamento intero che rende massima la correlazione dell'altezza d'onda
+--sposta-adcp-ore  ore da sommare ai tempi dell'ADCP per portarli in UTC (default 0: i risultati sono
+             gia' in UTC se time_zone di metadata.json indicava l'orologio dello strumento). Se le onde
+             combaciano meglio con uno spostamento di un'ora o piu', lo script lo segnala
 
 Passi:
 1. Orologio. Correlazione fra Hm0 dell'ADCP e Hs della boa spostando i tempi dell'ADCP da -6 a +6 ore
@@ -46,6 +47,7 @@ MAREGGIATE = [("21–22 agosto", "2026-08-20 12:00", "2026-08-23 00:00"),
               ("8–9 ottobre", "2026-10-08 00:00", "2026-10-10 00:00"),
               ("20–22 ottobre", "2026-10-20 00:00", "2026-10-23 00:00")]
 OMEGA = {"M2": 28.9841042, "S2": 30.0, "N2": 28.4397295, "K1": 15.0410686, "O1": 13.9430356}   # gradi all'ora
+LAT_STAZIONE = 44.37805          # Sturla: la boa e' ancorata sopra l'ADCP
 
 
 def trova(cartella, schema):
@@ -122,7 +124,7 @@ def fasi_di_marea(risultati, dati):
     cost = list(OMEGA)
 
     def fit(s):
-        co = utide.solve(s.index.values, s.values, lat=44.38, constit=cost, method="ols", conf_int="linear",
+        co = utide.solve(s.index.values, s.values, lat=LAT_STAZIONE, constit=cost, method="ols", conf_int="linear",
                          trend=True, verbose=False)
         return pd.DataFrame({"A_cm": 100 * co.A, "g": co.g, "g_ci": co.g_ci}, index=co.name)
 
@@ -176,7 +178,10 @@ def main(argv=None):
             marea.to_csv(os.path.join(a.uscita, "confronto_boa_fasi_marea.csv"))
         except (ImportError, FileNotFoundError) as e:
             print(f"controllo con la marea saltato: {e}")
-    sposta = a.sposta_adcp_ore if a.sposta_adcp_ore is not None else float(np.round(best.sposta_h))
+    sposta = a.sposta_adcp_ore if a.sposta_adcp_ore is not None else 0.0
+    if abs(best.sposta_h - sposta) >= 1:
+        print(f"ATTENZIONE: le onde combaciano meglio spostando l'ADCP di {best.sposta_h:+.2f} h invece di "
+              f"{sposta:+.1f} h: controllare l'orologio dello strumento (time_zone in metadata.json)")
     print(f"tempi dell'ADCP spostati di {sposta:+.1f} h per il confronto")
 
     # 2. coppie e 3. statistiche
@@ -309,14 +314,18 @@ def figura_orologio(C, marea, sposta, path):
         ax.axvline(0, color=AXIS, lw=0.8)
         ax.set_yticks(y)
         ax.set_yticklabels(marea.index)
-        ax.set_xlim(-0.5, 4)
+        lo, hi = (marea.sfasamento_h - marea.incertezza_h).min(), (marea.sfasamento_h + marea.incertezza_h).max()
+        ax.set_xlim(min(-1.0, lo - 0.5), max(3.5, hi + 0.5))
         ax.set_ylim(-1.4, len(marea) - 0.5)
         ax.set_xlabel("ritardo della fase nell'ADCP rispetto a MedFS (ore)")
         ax.text(0.02, 0.02, "Se le medie orarie di MedFS sono etichettate all'inizio dell'ora,\n"
                 "tutti i ritardi sono 0.5 ore più piccoli.", transform=ax.transAxes, fontsize=8.5, color=INK2)
         ax.set_title("Marea: fase nel livello dell'ADCP e in MedFS", loc="left")
-    fig.suptitle("Orologio dell'ADCP: avanti di circa 2 ore rispetto a UTC", x=0.01, ha="left", fontweight="bold",
-                 fontsize=12)
+    titolo = f"Orologio dell'ADCP (tempi spostati di {sposta:+g} h): scarto residuo {-C.sposta_h[k]:+.1f} h secondo le onde"
+    if marea is not None:
+        wgt = 1 / marea.incertezza_h ** 2
+        titolo += f", {(marea.sfasamento_h * wgt).sum() / wgt.sum() - sposta:+.1f} h secondo la marea"
+    fig.suptitle(titolo, x=0.01, ha="left", fontweight="bold", fontsize=12)
     _save(fig, path)
 
 

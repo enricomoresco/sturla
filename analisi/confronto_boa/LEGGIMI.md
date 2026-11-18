@@ -11,8 +11,13 @@ python analisi/confronto_boa/confronto_boa.py --boa archive_data_2.csv --risulta
 - `--risultati`: la cartella del deployment con `postprocessing/` (serve `onde_parametri.csv`).
 - `--dati` (facoltativo): la cartella con il livello del riquadro MedFS (`scarica_dati.sh`). Serve al
   controllo dell'orologio con le fasi di marea, che usa UTide.
-- `--sposta-adcp-ore`: ore da sommare ai tempi dell'ADCP per portarli in UTC. Senza, lo script usa lo
-  spostamento intero che rende massima la correlazione fra le altezze d'onda.
+- `--sposta-adcp-ore`: ore da sommare ai tempi dell'ADCP per portarli in UTC (default 0). Se
+  `time_zone` di `metadata.json` indica l'orologio dello strumento, i risultati sono già in UTC; se le
+  onde combaciano meglio con uno spostamento di un'ora o più, lo script lo segnala.
+
+A Sturla l'orologio dell'ADCP era sull'ora legale italiana (UTC+2): le onde combaciavano con la boa
+spostando i tempi di −2.5 ore e la marea del livello era in ritardo di 2.5–2.9 ore su MedFS. Da qui
+`time_zone: "UTC+2"` in `metadati/STURLA_20260710_20261027.json`.
 
 | Passo | Metodo |
 |---|---|

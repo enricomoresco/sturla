@@ -288,7 +288,10 @@ def write_report(path: str, did: str, md: dict, hab: float, inv: dict | None, de
 
     # 8. limiti
     L += ["## 8. Limiti e avvertenze", "",
-          f"- Fuso orario: {md.get('time_zone', 'non specificato: da verificare (orologio dello strumento)')}.",
+          (f"- Tempi in UTC: l'orologio dello strumento era a {md['instrument_clock']} ed e' stato corretto di "
+           f"{md['time_offset_applied_h']:+g} h; i ping in `raw/` (L1) restano con l'orario dello strumento."
+           if md.get("time_offset_applied_h") else
+           f"- Fuso orario: {md.get('time_zone', 'non specificato: da verificare (orologio dello strumento)')}."),
           "- I dati sono controllati automaticamente, non validati manualmente.",
           "- La pressione e' assunta relativa (azzerata in aria); l'offset letto in aria e' riportato sopra.", ""]
     with open(path, "w", encoding="utf-8") as fh:

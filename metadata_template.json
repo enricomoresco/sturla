@@ -13,6 +13,7 @@
   "instrument_height_above_bed_m": 0.6,
   "magnetic_declination_deg": null,
   "magnetic_declination_applied": false,
+  "_time_zone": "orario dell'orologio dello strumento come scostamento fisso dall'UTC: UTC, oppure UTC+2 se sincronizzato con un computer sull'ora legale italiana. I prodotti escono in UTC. Non usare Europe/Rome.",
   "time_zone": "UTC (da verificare: orologio dello strumento)",
   "deployment_id": null,
   "deployment_start": null,

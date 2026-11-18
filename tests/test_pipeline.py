@@ -629,3 +629,59 @@ def test_motion_events_merge_and_net_rotation():
     mt = ST.motion_table(dict(motion_events=ev), w)
     assert len(mt) == 2 and abs(mt.rotazione_heading.iloc[0] - 9.5) < 1e-6
     assert abs(mt.Hm0_max_prima.iloc[0] - 1.9) < 1e-6
+
+
+def test_instrument_clock_offset():
+    from adcp_pd0.archive import instrument_clock_offset as off
+    assert off({})[0] == 0.0 and off({"time_zone": None})[0] == 0.0
+    assert off({"time_zone": "UTC (da verificare: orologio dello strumento)"})[0] == 0.0
+    for txt, h in (("UTC+2", 2.0), ("UTC+02:00", 2.0), ("utc -3", -3.0), ("UTC+5:30", 5.5), ("GMT+1", 1.0),
+                   ("CEST", 2.0), ("CET", 1.0), ("UTC+2 (ora legale italiana)", 2.0), (2, 2.0)):
+        assert off({"time_zone": txt})[0] == h, txt
+    for bad in ("Europe/Rome", "ora legale", "UTC+20"):
+        with pytest.raises(SystemExit):
+            off({"time_zone": bad})
+
+
+def test_clock_correction_to_utc(sentinel, tmp_path):
+    """Orologio dello strumento a UTC+2: prodotti in UTC, L1 invariato, stesso contenuto spostato di 2 ore."""
+    md = json.load(open(os.path.join(REPO, "metadata_template.json")))
+    md.update(station_id="TEST", time_zone="UTC")
+    runs = {}
+    for tz in ("UTC", "UTC+2"):
+        mdf = tmp_path / f"md_{tz}.json"
+        mdf.write_text(json.dumps(dict(md, time_zone=tz)))
+        out = tmp_path / tz.replace("+", "p")
+        runs[tz] = (run_pre(sentinel["file"], "-o", out, "--metadata", mdf), out)
+    (r0, o0), (r2, o2) = runs["UTC"], runs["UTC+2"]
+    assert r0["id"] == "TEST_20260710_20260710" and r2["id"] == "TEST_20260709_20260710"
+    stream = pick_stream(str(o2), "waves")
+    raw = StreamReader(str(o2), stream).times()
+    utc = StreamReader(str(o2), stream, clock_offset_h=2).times()
+    assert (raw - utc == np.timedelta64(2, "h")).all()
+    sub = StreamReader(str(o2), stream, clock_offset_h=2).load(["pressure"], t0=utc[10], t1=utc[20])
+    assert (sub.time.values == utc[10:20]).all()
+    two = np.timedelta64(2, "h")
+    for suffix in ("L2_currents", "L2_temperature", "L2_wave_bursts"):
+        a = xr.open_dataset(one(o0 / "preprocessing", f"*_{suffix}.nc"))
+        b = xr.open_dataset(one(o2 / "preprocessing", f"*_{suffix}.nc"))
+        assert (a.time.values - b.time.values == two).all(), suffix
+        assert b.attrs["time_zone"] == "UTC" and b.attrs["instrument_clock"] == "UTC+2"
+        assert b.attrs["time_offset_applied_h"] == -2.0 and "instrument_clock" not in a.attrs
+        v = "u" if "u" in a else "temperature"
+        np.testing.assert_array_equal(a[v].values, b[v].values)
+    d0 = json.load(open(o0 / "preprocessing" / "deployment.json"))
+    d2 = json.load(open(o2 / "preprocessing" / "deployment.json"))
+    assert pd.Timestamp(d0["start"]) - pd.Timestamp(d2["start"]) == pd.Timedelta("2h")
+    assert json.load(open(o2 / "preprocessing" / "metadata.json"))["time_zone"] == "UTC+2"
+    rep = one(o2 / "preprocessing", "*_RAPPORTO_PREPROCESSING.md").read_text(encoding="utf-8")
+    assert "Tempi in UTC" in rep and "UTC+2" in rep
+    run_post("-o", o0)
+    run_post("-o", o2)
+    res = json.load(open(o2 / "postprocessing" / "risultati.json", encoding="utf-8"))
+    assert res["strumento"]["time_offset_applied_h"] == -2.0
+    w = xr.open_dataset(one(o2 / "postprocessing", "*_L3_waves.nc"))
+    assert w.attrs["time_zone"] == "UTC" and w.attrs["instrument_clock"] == "UTC+2"
+    t0 = pd.read_csv(o0 / "postprocessing" / "tabelle" / "onde_parametri.csv", index_col=0, parse_dates=True).index
+    t2 = pd.read_csv(o2 / "postprocessing" / "tabelle" / "onde_parametri.csv", index_col=0, parse_dates=True).index
+    assert (t0 - t2 == pd.Timedelta("2h")).all()

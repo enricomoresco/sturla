@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -98,6 +99,45 @@ def load_metadata(path: str | None) -> dict:
         with open(path, encoding="utf-8") as fh:
             md = {k: v for k, v in json.load(fh).items() if not k.startswith("_")}
     return md
+
+
+_CLOCK_NAMES = {"UTC": 0.0, "GMT": 0.0, "Z": 0.0, "CET": 1.0, "CEST": 2.0}
+
+
+def instrument_clock_offset(md: dict) -> tuple[float, str]:
+    """Ore di anticipo dell'orologio dello strumento sull'UTC, dal campo ``time_zone`` dei metadati.
+
+    Vale 'UTC', 'UTC+2', 'UTC+02:00', 'UTC-3', 'UTC+5:30', 'CET', 'CEST' o un numero di ore; il
+    testo che segue (es. '(da verificare)') e' un commento. Un fuso con il cambio dell'ora
+    (Europe/Rome) non va bene: l'orologio dello strumento resta quello impostato alla
+    configurazione. Restituisce (ore, testo dei metadati)."""
+    v = md.get("time_zone")
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return 0.0, "non indicato (tempi considerati UTC)"
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        h, txt = float(v), f"UTC{float(v):+g}"
+    else:
+        txt = str(v).strip()
+        m = re.match(r"(?i)(UTC|GMT|CEST|CET|Z)(?![A-Z])\s*(?:([+-])\s*(\d{1,2})(?::?(\d{2}))?)?", txt)
+        if not m:
+            raise SystemExit(
+                f"time_zone dei metadati non riconosciuto: {v!r}. Indicare l'orologio dello strumento "
+                "come scostamento fisso dall'UTC, es. \"UTC\" oppure \"UTC+2\" (ora legale italiana); "
+                "un fuso con il cambio dell'ora come Europe/Rome non va bene")
+        h = _CLOCK_NAMES[m.group(1).upper()]
+        if m.group(2):
+            h += (1 if m.group(2) == "+" else -1) * (int(m.group(3)) + int(m.group(4) or 0) / 60.0)
+    if not -14 <= h <= 14:
+        raise SystemExit(f"time_zone dei metadati fuori scala: {v!r} ({h:+g} h)")
+    return h, txt
+
+
+def clock_attrs(md: dict, hours: float, text: str) -> dict:
+    """Metadati per i prodotti: con un orologio non in UTC i tempi sono riportati in UTC e
+    l'orologio originale resta indicato in ``instrument_clock``."""
+    if not hours:
+        return dict(md)
+    return dict(md, time_zone="UTC", instrument_clock=text, time_offset_applied_h=-hours)
 
 
 def code_version() -> str:
@@ -198,8 +238,9 @@ def _global_attrs(md: dict, ds_src: xr.Dataset, kind: str, t: np.ndarray, level:
         if ds_src.attrs.get(k):
             a[k] = str(ds_src.attrs[k])
     for k in ("instrument_height_above_bed_m", "institution", "project", "creator_name", "creator_email", "license", "deployment_id",
-              "deployment_start", "deployment_end", "time_zone", "comment",
-              "geospatial_vertical_reference", "magnetic_declination_deg", "magnetic_declination_applied"):
+              "deployment_start", "deployment_end", "time_zone", "instrument_clock", "time_offset_applied_h",
+              "comment", "geospatial_vertical_reference", "magnetic_declination_deg",
+              "magnetic_declination_applied"):
         if md.get(k) is not None:
             v = md[k]
             a[k] = str(v) if isinstance(v, bool) else v
@@ -216,7 +257,7 @@ def _global_attrs(md: dict, ds_src: xr.Dataset, kind: str, t: np.ndarray, level:
 L3_KEEP = ("Conventions", "title", "station_id", "platform", "instrument", "instrument_serial_number",
            "instrument_firmware", "source_file", "institution", "project", "creator_name", "creator_email",
            "license", "deployment_id", "deployment_start", "deployment_end", "deployment_method", "time_zone",
-           "comment", "geospatial_vertical_reference", "magnetic_declination_deg",
+           "instrument_clock", "time_offset_applied_h", "comment", "geospatial_vertical_reference", "magnetic_declination_deg",
            "magnetic_declination_applied", "geospatial_lat_min", "geospatial_lat_max", "geospatial_lon_min",
            "geospatial_lon_max", "instrument_height_above_bed_m", "processing_level")
 

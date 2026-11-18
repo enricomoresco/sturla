@@ -229,8 +229,11 @@ forma leggibile; `<ID>_risultati_per_report.zip` contiene tutto tranne le serie 
 ### 3.3 Convenzioni
 
 - **Tempi**: correnti e temperatura al centro dell'ora; onde all'inizio del burst;
-  termoclino all'inizio del giorno. Il fuso orario è quello dell'orologio dello strumento
-  (attributo `time_zone`).
+  termoclino all'inizio del giorno. I tempi sono in UTC quando `time_zone` di `metadata.json`
+  indica l'orologio dello strumento (per esempio `UTC+2` se era sull'ora legale italiana): il
+  pre-processing li corregge e i prodotti riportano `time_zone = UTC`, l'orologio originale in
+  `instrument_clock` e la correzione in `time_offset_applied_h`. Solo i ping in `raw/` (L1)
+  restano con l'orario dello strumento. Senza indicazione i tempi sono quelli registrati.
 - **Quote**: `z` è la quota sul fondale, positiva verso l'alto.
 - **Direzioni**: gradi da Nord in senso orario; correnti **verso cui vanno**, onde **da cui
   provengono**. Il riferimento (Nord magnetico o geografico) dipende dall'heading bias
@@ -291,7 +294,9 @@ Nel file delle correnti le celle sopra la superficie risultano **sempre** cattiv
   dello strumento; da non interpretare senza verifiche.
 - **Pressione**: assunta relativa (azzerata in aria); l'eventuale offset letto in aria è
   riportato nel rapporto e si corregge con `--p-atm`.
-- Fuso orario e declinazione magnetica vanno confermati con chi ha configurato lo strumento.
+- L'orologio dello strumento e la declinazione magnetica vanno confermati con chi ha
+  configurato lo strumento. Un confronto con una boa o con la marea di un modello in UTC
+  rivela un orologio spostato di ore intere (vedi `analisi/confronto_boa/`).
 
 ## 6. Come rifare l'elaborazione
 

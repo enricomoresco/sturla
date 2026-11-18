@@ -25,5 +25,5 @@ Ci vogliono pochi secondi.
 | Bande in finestre mobili | Ogni 12 ore, su 3 giorni: minimi quadrati di un residuo più le bande diurna (24 h), inerziale e semidiurna (M2), in forma rotatoria; per la temperatura in forma reale | nel file `armonica_correnti.pkl` |
 | Figure | (12) ampiezza e fase dei costituenti con la quota, varianza spiegata, marea nella temperatura; (13) bande nelle finestre mobili | `12_marea_correnti_temperatura.png`, `13_bande_finestre_mobili.png` |
 
-La latitudine viene dai metadati del deployment; se mancano si usa 44.38° N. In 110 giorni K1 non si
+La latitudine viene dai metadati del deployment; se mancano si usa 44.378° N (la boa sopra l'ADCP). In 110 giorni K1 non si
 separa da S1 (brezza) e P1, né S2 da K2: K1 comprende anche il ciclo giornaliero della brezza.

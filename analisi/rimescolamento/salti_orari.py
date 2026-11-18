@@ -45,7 +45,7 @@ def main(argv=None):
     out["vento m/s"] = np.hypot(E.u10, E.v10).reindex(out.index)
     out["vento da (gradi)"] = (np.rad2deg(np.arctan2(-E.u10, -E.v10)) % 360).reindex(out.index)
     parti = []
-    for t0, t1 in (("2026-10-07 18:00", "2026-10-09 12:00"), ("2026-10-18 06:00", "2026-10-19 12:00")):
+    for t0, t1 in (("2026-10-07 16:00", "2026-10-09 10:00"), ("2026-10-18 04:00", "2026-10-19 10:00")):   # UTC
         x = out.loc[t0:t1]
         print(x.iloc[::2].round(1).to_string())
         print()

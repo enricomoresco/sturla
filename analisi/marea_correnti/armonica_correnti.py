@@ -23,7 +23,7 @@ import pandas as pd
 import xarray as xr
 import utide
 
-LAT_DEFAULT = 44.38              # Sturla, se le coordinate della stazione non sono nei metadati
+LAT_DEFAULT = 44.37805           # Sturla (boa sopra l'ADCP), se le coordinate non sono nei metadati
 
 
 def trova(cartella, schema):

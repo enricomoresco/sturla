@@ -113,6 +113,16 @@ strumento, declinazione magnetica (e se è già impostata nello strumento). I va
 negli attributi dei NetCDF. La latitudine serve anche per il periodo inerziale nei grafici
 delle correnti.
 
+`time_zone` è l'orario a cui era impostato l'orologio dello strumento, come scostamento fisso
+dall'UTC: `UTC`, oppure `UTC+2` se lo strumento è stato sincronizzato con un computer
+sull'ora legale italiana (`UTC+1` con l'ora solare). Il pre-processing riporta tutti i tempi in
+UTC; i file in `out/raw/` restano con l'orario dello strumento, quindi per correggere un
+deployment già elaborato basta rilanciare il pre-processing, senza `--riconverti`. Non usare un
+fuso con il cambio dell'ora come `Europe/Rome`: l'orologio dello strumento non lo segue.
+
+I metadati dei deployment già elaborati sono in `metadati/`, per esempio
+`metadati/STURLA_20260710_20261027.json`.
+
 ## Opzioni principali
 
 `python preprocessing.py -h` e `python postprocessing.py -h` per l'elenco completo.
@@ -120,7 +130,7 @@ delle correnti.
 | pre-processing | significato | default |
 |---|---|---|
 | `--hab` | altezza del trasduttore (e del sensore di pressione) sul fondale [m] | dai metadati, altrimenti 0.6 |
-| `--start`, `--end` | correzione manuale del periodo in posizione | automatico |
+| `--start`, `--end` | correzione manuale del periodo in posizione (in UTC se `time_zone` indica un orologio spostato) | automatico |
 | `--range` | elabora solo una porzione del file, es. `45%:55%` (prove veloci) | tutto |
 | `--riconverti` | rilegge il PD0 anche se `out/raw/` esiste | no |
 | `--avg-minutes` | intervallo delle medie di corrente [min]; `0` = un profilo per burst | 60 |
