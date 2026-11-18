@@ -69,6 +69,8 @@ Nella stessa cartella ci sono gli script per i confronti con ERA5 e MedFS, per l
 fondo e per le figure delle run GOTM (argomento `--gotm`), descritti nello stesso LEGGIMI.
 `analisi/marea_correnti/` contiene l'analisi armonica delle correnti quota per quota
 ([`LEGGIMI.md`](analisi/marea_correnti/LEGGIMI.md)).
+`analisi/confronto_boa/` confronta le onde dell'ADCP con quelle di una boa ondametrica e controlla
+l'orologio dell'ADCP ([`LEGGIMI.md`](analisi/confronto_boa/LEGGIMI.md)).
 
 ## Livelli dei dati e cartelle
 
