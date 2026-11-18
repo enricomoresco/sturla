@@ -39,13 +39,15 @@ import matplotlib.dates as mdates
 # ------------------------------------------------------------------ impostazioni
 NPERSEG, FMIN, FMAX = 256, 0.04, 0.6            # spettro di Welch e bande, come nel post-processing
 HM0_DIR_MIN, COH_MIN, QUOTA_DIREZIONE = 0.25, 0.3, 0.7
-TOLLERANZA_MIN = 30                              # distanza massima fra burst e dato della boa
+TOLLERANZA_MIN = 30                              # distanza massima fra burst e dato orario della boa
+TOLLERANZA_RADA_MAX = 90                         # con dati radi: meta' dell'intervallo, al piu' questi minuti
+PASSO_RADO_H = 2.5                               # dati della boa piu' distanti di cosi': campionamento rado
 SOGLIA_MAREGGIATA = 1.5                          # Hs della boa che definisce una mareggiata (m)
 CLASSI_HS = [(0, 0.3), (0.3, 0.5), (0.5, 1.0), (1.0, 1.5), (1.5, 9.0)]
 OMEGA = {"M2": 28.9841042, "S2": 30.0, "N2": 28.4397295, "K1": 15.0410686, "O1": 13.9430356}   # gradi all'ora
 ORIGINE = pd.Timestamp("2026-01-01")             # origine dei tempi per le fasi di marea
 
-C1, C2, C3 = "#2a78d6", "#eb6834", "#1baf7a"
+C1, C2, C3 = "#2a78d6", "#eb6834", "#1baf7a"     # ADCP o coppie con la boa oraria; boa oraria; boa rada
 INK, INK2, MUTED, GRID, AXIS, SURF = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7", "#fcfcfb"
 plt.rcParams.update({
     "figure.facecolor": SURF, "axes.facecolor": SURF, "savefig.facecolor": SURF, "axes.edgecolor": AXIS,
@@ -197,44 +199,70 @@ def leggi_boa(p) -> pd.DataFrame:
     b["t"] = pd.to_datetime(b["UTC"], utc=True).dt.tz_convert(None)      # orari senza fuso = UTC
     for c in ("Hs", "Tp", "Ta", "Dd"):
         b[c] = pd.to_numeric(b.get(c), errors="coerce")
-    return b.sort_values("t").drop_duplicates("t").set_index("t")
+    b = b.sort_values("t").drop_duplicates("t").set_index("t")
+    # campionamento: distanza dal dato vicino piu' prossimo, mediana su 5 dati (un dato fuori orario non conta)
+    g = b.index.to_series().diff().dt.total_seconds() / 3600
+    b["passo_h"] = pd.Series(np.fmin(g.to_numpy(), g.shift(-1).to_numpy()), index=b.index) \
+        .rolling(5, center=True, min_periods=1).median()
+    b["rada"] = b.passo_h > PASSO_RADO_H
+    b.attrs["passo_rado_h"] = float(b.passo_h[b.rada].median()) if b.rada.any() else np.nan
+    return b
+
+
+def etichetta_rada(b) -> str:
+    p = b.attrs.get("passo_rado_h", np.nan)
+    return f"un dato ogni {p:.0f} ore" if np.isfinite(p) else "dati radi"
 
 
 # ------------------------------------------------------------------ 7. correlazione con lo sfasamento
 def correlazione_sfasamenti(w, b, passi=np.arange(-6, 6.01, 0.25)):
-    """Correlazione fra Hm0 dell'ADCP e Hs della boa spostando i tempi dell'ADCP; la boa e' interpolata
-    solo fra dati distanti al piu' 1.5 ore."""
+    """Correlazione fra Hm0 dell'ADCP e Hs della boa spostando i tempi dell'ADCP. La boa e' interpolata fra due
+    dati consecutivi distanti al piu' 1.5 ore (colonne r, n) e, a parte, dove la boa e' rada (r_rada, n_rada:
+    dati distanti fino al passo rado piu' mezz'ora)."""
     t0 = b.index[0]
     tb = ((b.index - t0) / pd.Timedelta("1h")).to_numpy()
+    p_rado = b.attrs.get("passo_rado_h", np.nan)
     out = []
     for L in passi:
         tq = (((w.centro + pd.Timedelta(hours=float(L))) - t0) / pd.Timedelta("1h")).to_numpy()
         i = np.searchsorted(tb, tq)
-        ok = (i > 0) & (i < len(tb))
+        dentro = (i > 0) & (i < len(tb))
         ii = np.clip(i, 1, len(tb) - 1)
-        ok &= (tb[ii] - tb[ii - 1]) <= 1.5
-        v = np.interp(tq[ok], tb, b.Hs.values)
-        r = np.corrcoef(w.Hm0.values[ok], v)[0, 1] if ok.sum() > 10 else np.nan
-        out.append((float(L), float(r), int(ok.sum())))
-    return pd.DataFrame(out, columns=["sposta_h", "r", "n"])
+        g = tb[ii] - tb[ii - 1]
+        riga = [float(L)]
+        for ok in (dentro & (g <= 1.5), dentro & (g > 1.5) & (g <= p_rado + 0.5)):
+            v = np.interp(tq[ok], tb, b.Hs.values)
+            riga += [float(np.corrcoef(w.Hm0.values[ok], v)[0, 1]) if ok.sum() > 10 else np.nan, int(ok.sum())]
+        out.append(riga)
+    return pd.DataFrame(out, columns=["sposta_h", "r", "n", "r_rada", "n_rada"])
 
 
 # ------------------------------------------------------------------ 8. coppie burst-boa
 def accoppia(w, b, sposta_h) -> pd.DataFrame:
-    bt = b.index.values
-    tq = (w.centro + pd.Timedelta(hours=sposta_h)).values
-    i = np.searchsorted(bt, tq)
-    i0, i1 = np.clip(i - 1, 0, len(bt) - 1), np.clip(i, 0, len(bt) - 1)
-    d0 = np.abs((tq - bt[i0]) / np.timedelta64(1, "m"))
-    d1 = np.abs((bt[i1] - tq) / np.timedelta64(1, "m"))
+    """Ogni dato della boa con il burst piu' vicino (centro del burst, in UTC): entro 30 minuti se la boa e'
+    oraria, entro meta' dell'intervallo (al piu' 90 minuti) se e' rada. Un burst con piu' dati tiene il piu' vicino."""
+    ta = (w.centro + pd.Timedelta(hours=sposta_h)).to_numpy()
+    ordine = np.argsort(ta, kind="stable")
+    ts = ta[ordine]
+    bt = b.index.to_numpy()
+    i = np.searchsorted(ts, bt)
+    i0, i1 = np.clip(i - 1, 0, len(ts) - 1), np.clip(i, 0, len(ts) - 1)
+    d0 = np.abs((bt - ts[i0]) / np.timedelta64(1, "m"))
+    d1 = np.abs((ts[i1] - bt) / np.timedelta64(1, "m"))
     j = np.where(d0 <= d1, i0, i1)
     d = np.minimum(d0, d1)
-    ok = d <= TOLLERANZA_MIN
-    P = w[ok].copy()
-    P["tempo_utc"] = tq[ok]
+    rada = b.rada.to_numpy()
+    tol = np.where(rada, np.clip(b.passo_h.to_numpy() * 30, TOLLERANZA_MIN, TOLLERANZA_RADA_MAX), TOLLERANZA_MIN)
+    ok = d <= tol
+    k = ordine[j[ok]]
+    P = w.iloc[k].copy()
+    P["tempo_utc"] = ta[k]
     for c in ("Hs", "Tp", "Ta", "Dd"):
-        P[f"{c}_boa"] = b[c].values[j[ok]]
+        P[f"{c}_boa"] = b[c].to_numpy()[ok]
+    P["tempo_boa"] = bt[ok]
     P["scarto_tempo_min"] = d[ok]
+    P["boa_rada"] = rada[ok]
+    P = P.sort_values("scarto_tempo_min", kind="stable").drop_duplicates("tempo_utc").sort_values("tempo_utc")
     return P.set_index("tempo_utc")
 
 
@@ -394,59 +422,75 @@ def _con_buchi(s, ore=6):
 
 
 def figura_altezza(P, b, w, sposta, M, mov, path):
-    """Serie temporale: Hs della boa e Hm0 dell'ADCP, mareggiate, movimenti del telaio; sotto, il rapporto."""
-    fig, (ax, ax2) = plt.subplots(2, 1, figsize=(15, 7.4), sharex=True, layout="constrained",
+    """Serie temporale: Hs della boa (oraria e rada con colori diversi) e Hm0 dell'ADCP, mareggiate, movimenti
+    del telaio; sotto, il rapporto ADCP/boa di ogni coppia."""
+    fig, (ax, ax2) = plt.subplots(2, 1, figsize=(15, 7.6), sharex=True, layout="constrained",
                                   gridspec_kw=dict(height_ratios=[3, 1.3]))
     lo, hi = P.index.min() - pd.Timedelta("12h"), P.index.max() + pd.Timedelta("12h")
     for _, r in M.iterrows():
         for a_ in (ax, ax2):
             a_.axvspan(r.inizio, r.fine, color=GRID, alpha=0.6, lw=0, zorder=0)
-    y = _con_buchi(b.Hs[lo:hi])
+    bb = b[lo:hi]
+    rada_txt = etichetta_rada(b)
+    y = _con_buchi(bb.Hs[~bb.rada])
+    maniglie = [ax.plot(y.index, y.values, color=C2, lw=1.1, label="boa, Hs, un dato all'ora")[0]]
+    if bb.rada.any():
+        yr = _con_buchi(bb.Hs[bb.rada], ore=max(6.0, 2 * b.attrs.get("passo_rado_h", 3.0)))
+        maniglie.append(ax.plot(yr.index, yr.values, color=C3, lw=1.1, marker="o", ms=2.8,
+                                label=f"boa, Hs, {rada_txt}")[0])
     Wu = w.set_index(w.centro + pd.Timedelta(hours=sposta)).Hm0.sort_index()
     x = _con_buchi(Wu[lo:hi])
-    l1, = ax.plot(y.index, y.values, color=C2, lw=1.1, label="boa, Hs")
-    l2, = ax.plot(x.index, x.values, color=C1, lw=1.1,
-                  label="ADCP, Hm0 dai burst" + (f" (tempi del file spostati di {sposta:+g} h)" if sposta else ""))
-    ymax = float(max(np.nanmax(y.values), np.nanmax(x.values))) * 1.22
-    maniglie = [l1, l2]
+    maniglie.append(ax.plot(x.index, x.values, color=C1, lw=1.1, zorder=1.5,
+                            label="ADCP, Hm0 dai burst" + (f" (tempi del file spostati di {sposta:+g} h)" if sposta else ""))[0])
+    ymax = float(max(np.nanmax(bb.Hs.values), np.nanmax(x.values))) * 1.22
     if mov is not None and not mov.empty:
         mv = mov.assign(tm=mov.inizio + (mov.fine - mov.inizio) / 2).sort_values("tm")
         mv = mv[(mv.tm >= lo) & (mv.tm <= hi)].reset_index(drop=True)
         vicino = pd.Timedelta("4D")                 # etichette di episodi vicini: la prima a sinistra della linea
         for i, r in mv.iterrows():
             for a_ in (ax, ax2):
-                a_.axvline(r.tm, color=C3, lw=1.4, ls="--", zorder=1)
+                a_.axvline(r.tm, color=INK2, lw=1.2, ls="--", zorder=1)
             col_prec = i > 0 and r.tm - mv.tm[i - 1] < vicino
             col_succ = i + 1 < len(mv) and mv.tm[i + 1] - r.tm < vicino
             testo = f"{r.rotazione:+.1f}°" if np.isfinite(r.rotazione) else "telaio"
             a_sinistra = col_succ and not col_prec
-            ax.text(r.tm, ymax * (0.985 - 0.085 * col_prec), testo + " " if a_sinistra else " " + testo, color=C3,
+            ax.text(r.tm, ymax * (0.985 - 0.085 * col_prec), testo + " " if a_sinistra else " " + testo, color=INK2,
                     fontsize=9, va="top", ha="right" if a_sinistra else "left", fontweight="bold")
-        maniglie.append(plt.Line2D([], [], color=C3, lw=1.4, ls="--", label="movimento del telaio, con la rotazione dell'heading"))
+        maniglie.append(plt.Line2D([], [], color=INK2, lw=1.2, ls="--",
+                                   label="movimento del telaio (rotazione dell'heading)"))
     if not M.empty:
         maniglie.append(plt.Rectangle((0, 0), 1, 1, color=GRID, alpha=0.6, label=f"Hs della boa sopra {SOGLIA_MAREGGIATA:g} m"))
     ax.set(xlim=(lo, hi), ylim=(0, ymax), ylabel="altezza d'onda significativa (m)")
     ax.legend(handles=maniglie, loc="lower left", fontsize=9, ncols=len(maniglie), bbox_to_anchor=(0, 1.0),
-              borderaxespad=0.2, handlelength=2.2)
+              borderaxespad=0.2, handlelength=2.2, columnspacing=1.6)
     fig.suptitle("Altezza d'onda significativa: boa e ADCP (tempi in UTC)", x=0.01, ha="left",
                  fontweight="bold", fontsize=12)
     rap = (P.Hm0 / P.Hs_boa).sort_index()
-    ax2.scatter(rap.index, rap.values, s=7, color=C1, alpha=0.45, lw=0)
+    rada = P.boa_rada.sort_index().to_numpy()
+    ax2.scatter(rap.index[~rada], rap.values[~rada], s=8, color=C1, alpha=0.5, lw=0, label="boa oraria")
+    if rada.any():
+        ax2.scatter(rap.index[rada], rap.values[rada], s=8, color=C3, alpha=0.7, lw=0, label=f"boa, {rada_txt}")
     med = _con_buchi(rap.rolling("3D", center=True, min_periods=5).median(), ore=12)
     ax2.plot(med.index, med.values, color=INK, lw=1.5, label="mediana mobile su 3 giorni")
     ax2.axhline(1, color=AXIS, lw=1)
     ax2.set(ylim=(0, 1.6), ylabel="Hm0 ADCP / Hs boa")
-    ax2.legend(loc="upper left", fontsize=8.5)
+    ax2.legend(loc="lower right", bbox_to_anchor=(1.0, 1.0), fontsize=8.5, ncols=3, markerscale=2,
+               borderaxespad=0.2)
     ax2.set_title("Rapporto fra ADCP e boa in ogni coppia (1 = stessa altezza)", loc="left")
     _asse_tempo(ax2)
     fig.savefig(path, dpi=150)
     plt.close(fig)
 
 
-def figura_onde(P, path):
-    fig, axs = plt.subplots(1, 3, figsize=(13.5, 5.0), layout="constrained")
+def figura_onde(P, b, path):
+    """Dispersioni di altezza, periodo medio e direzione; colori diversi per le coppie con la boa rada."""
+    rada = P.boa_rada.to_numpy()
+    rada_txt = etichetta_rada(b)
+    fig, axs = plt.subplots(1, 3, figsize=(13.5, 5.2), layout="constrained")
     ax = axs[0]
-    ax.scatter(P.Hs_boa, P.Hm0, s=10, color=C1, alpha=0.45, lw=0)
+    ax.scatter(P.Hs_boa[~rada], P.Hm0[~rada], s=10, color=C1, alpha=0.45, lw=0, label="boa oraria")
+    if rada.any():
+        ax.scatter(P.Hs_boa[rada], P.Hm0[rada], s=10, color=C3, alpha=0.65, lw=0, label=f"boa, {rada_txt}")
     lim = max(P.Hs_boa.max(), P.Hm0.max()) * 1.05
     ax.plot([0, lim], [0, lim], color=AXIS, lw=1)
     g = P.groupby(pd.cut(P.Hs_boa, np.arange(0, lim + 0.25, 0.25)), observed=True).Hm0
@@ -454,52 +498,73 @@ def figura_onde(P, path):
     ax.plot([iv.mid for iv in med.index], med.values, "-o", color=INK, ms=4, lw=1.6,
             label="mediana per classe di Hs della boa")
     s = statistiche(P.Hm0, P.Hs_boa)
-    ax.text(0.03, 0.97, f"n {s['n']}, r {s['r']:.2f}\ndifferenza media {s['bias']:+.2f} m\n"
-            f"scarto quadratico {s['rmse']:.2f} m", transform=ax.transAxes, va="top", color=INK2)
+    testo = f"tutte: n {s['n']}, r {s['r']:.2f}\ndifferenza media {s['bias']:+.2f} m\nscarto quadratico {s['rmse']:.2f} m"
+    if rada.any():
+        sr = statistiche(P.Hm0[rada], P.Hs_boa[rada])
+        testo += f"\n{rada_txt}: n {sr['n']}, r {sr['r']:.2f}\ndifferenza media {sr['bias']:+.2f} m"
+    ax.text(0.03, 0.97, testo, transform=ax.transAxes, va="top", color=INK2)
     ax.set(xlim=(0, lim), ylim=(0, lim), xlabel="Hs boa (m)", ylabel="Hm0 ADCP (m)", aspect="equal")
     ax.legend(loc="lower right", fontsize=8.5)
     ax.set_title("Altezza", loc="left")
     ax = axs[1]
-    mf = P.Hs_boa >= 0.5
+    mf = (P.Hs_boa >= 0.5).to_numpy()
     ax.scatter(P.Ta_boa[~mf], P.Tm01[~mf], s=8, color=MUTED, alpha=0.35, lw=0, label="Hs boa < 0.5 m")
-    ax.scatter(P.Ta_boa[mf], P.Tm01[mf], s=10, color=C1, alpha=0.6, lw=0, label="Hs boa ≥ 0.5 m")
+    ax.scatter(P.Ta_boa[mf & ~rada], P.Tm01[mf & ~rada], s=10, color=C1, alpha=0.6, lw=0,
+               label="Hs boa ≥ 0.5 m, boa oraria")
+    if (mf & rada).any():
+        ax.scatter(P.Ta_boa[mf & rada], P.Tm01[mf & rada], s=10, color=C3, alpha=0.75, lw=0,
+                   label=f"Hs boa ≥ 0.5 m, {rada_txt}")
     ax.plot([2, 9], [2, 9], color=AXIS, lw=1)
     s = statistiche(P.Tm01[mf], P.Ta_boa[mf])
     if s["n"] >= 3:
         ax.text(0.03, 0.97, f"Hs boa ≥ 0.5 m: n {s['n']}, r {s['r']:.2f}\ndifferenza media {s['bias']:+.2f} s",
                 transform=ax.transAxes, va="top", color=INK2)
     ax.set(xlim=(2, 9), ylim=(2, 9), xlabel="Ta boa (s)", ylabel="Tm01 ADCP (s)", aspect="equal")
-    ax.legend(loc="lower right", fontsize=8.5)
+    ax.legend(loc="upper left", bbox_to_anchor=(0.0, 0.86), fontsize=8.5)
     ax.set_title("Periodo medio", loc="left")
     ax = axs[2]
-    m = (P.direction_qc == 1) & (P.Hm0 >= 0.5)
-    ax.scatter(P.Dd_boa[m], P.Dp[m], s=12, color=C3, alpha=0.6, lw=0)
+    m = ((P.direction_qc == 1) & (P.Hm0 >= 0.5)).to_numpy()
+    ax.scatter(P.Dd_boa[m & ~rada], P.Dp[m & ~rada], s=12, color=C1, alpha=0.6, lw=0, label="boa oraria")
+    if (m & rada).any():
+        ax.scatter(P.Dd_boa[m & rada], P.Dp[m & rada], s=12, color=C3, alpha=0.75, lw=0, label=f"boa, {rada_txt}")
     ax.plot([140, 280], [140, 280], color=AXIS, lw=1)
     dd = ((P.Dp - P.Dd_boa + 180) % 360 - 180)[m]
     ax.text(0.03, 0.97, f"direzione ADCP affidabile, Hm0 ≥ 0.5 m\nn {int(m.sum())}, differenza media {dd.mean():+.1f}°\n"
             f"deviazione standard {dd.std():.0f}°", transform=ax.transAxes, va="top", color=INK2)
     ax.set(xlim=(140, 280), ylim=(140, 280), xlabel="direzione boa, Dd (°, da cui arrivano)",
            ylabel="direzione di picco ADCP, Dp (°)", aspect="equal")
+    ax.legend(loc="lower right", fontsize=8.5)
     ax.set_title("Direzione", loc="left")
     fig.suptitle("Onde: ADCP (dai burst) contro boa ondametrica", x=0.01, ha="left", fontweight="bold", fontsize=12)
     fig.savefig(path, dpi=150)
     plt.close(fig)
 
 
-def figura_orologio(C, T, sposta, path):
+def figura_orologio(C, T, sposta, b, path):
     n = 2 if T is not None else 1
     fig, axs = plt.subplots(1, n, figsize=(6.2 * n + 0.6, 4.6), layout="constrained", squeeze=False)
     ax = axs[0, 0]
-    ax.plot(C.sposta_h, C.r, color=C1, lw=2)
-    k = C.r.idxmax()
-    ax.plot(C.sposta_h[k], C.r[k], "o", color=C2, ms=7)
-    ax.axvline(sposta, color=C2, lw=1.2, ls="--")
-    ax.text(0.03, 0.06, f"massimo a {C.sposta_h[k]:+.2f} h: r {C.r[k]:.3f}\nspostamento usato {sposta:+g} h: "
-            f"r {np.interp(sposta, C.sposta_h, C.r):.3f}", transform=ax.transAxes, fontsize=9, color=INK2)
+    righe = []
+    for col, nn, colore, nome in (("r", "n", C1, "boa oraria"), ("r_rada", "n_rada", C3, f"boa, {etichetta_rada(b)}")):
+        if col not in C or not C[col].notna().any():
+            continue
+        k = C[col].idxmax()
+        ax.plot(C.sposta_h, C[col], color=colore, lw=2, label=f"{nome} (n {C[nn][k]})")
+        ax.plot(C.sposta_h[k], C[col][k], "o", color=colore, ms=8, mec=SURF, mew=2, zorder=3)
+        righe.append(f"{nome}: massimo a {C.sposta_h[k]:+.2f} h, r {C[col][k]:.3f}")
+    ax.axvline(sposta, color=INK2, lw=1.2, ls="--")
+    righe.append(f"spostamento usato {sposta:+g} h (linea tratteggiata)")
+    rr = C[[c for c in ("r", "r_rada") if c in C]].to_numpy(float)
+    lo_r, hi_r = np.nanmin(rr), np.nanmax(rr)
+    ax.set_ylim(lo_r - 0.32 * (hi_r - lo_r), hi_r + 0.06 * (hi_r - lo_r))
+    ax.text(0.03, 0.04, "\n".join(righe), transform=ax.transAxes, fontsize=9, color=INK2, zorder=4,
+            bbox=dict(facecolor=SURF, edgecolor="none", pad=2))
+    ax.legend(loc="upper right", fontsize=8.5)
     ax.set_xlabel("ore sommate ai tempi del file dei burst")
     ax.set_ylabel("correlazione Hm0 ADCP – Hs boa")
     ax.set_title("Onde: quando l'ADCP coincide con la boa", loc="left")
-    titolo = f"Orologio dell'ADCP: le onde coincidono meglio spostando i tempi di {C.sposta_h[k]:+.2f} h"
+    rif = "r" if C.r.notna().any() else "r_rada"
+    titolo = f"Orologio dell'ADCP: le onde coincidono meglio spostando i tempi di {C.sposta_h[C[rif].idxmax()]:+.2f} h"
     if T is not None:
         ax = axs[0, 1]
         y = np.arange(len(T))[::-1]
@@ -554,10 +619,12 @@ def confronta(cartella: Path, nome_burst, w_all, attrs, f_boa, f_medfs, sposta_s
     b = leggi_boa(f_boa)
     pos = f", posizione mediana {b.lat.median():.5f} N {b.lon.median():.5f} E" if "lat" in b else ""
     dire(f"boa: {len(b)} dati dal {b.index[0]} al {b.index[-1]}{pos}")
+    if b.rada.any():
+        dire(f"boa rada ({etichetta_rada(b)}): {int(b.rada.sum())} dati, dal {b.index[b.rada][0]} al {b.index[b.rada][-1]}")
 
     C = correlazione_sfasamenti(w, b)
     C.to_csv(uscita / "correlazione_sfasamenti.csv", index=False)
-    best = C.loc[C.r.idxmax()]
+    best = C.loc[C.r.idxmax()] if C.r.notna().any() else C.loc[C.r_rada.idxmax()].rename({"r_rada": "r"})
     sposta, motivo = (sposta_scelto, "scelto con --sposta-adcp-ore") if sposta_scelto is not None \
         else orologio_dal_file(attrs)
     if sposta is None:
@@ -566,6 +633,9 @@ def confronta(cartella: Path, nome_burst, w_all, attrs, f_boa, f_medfs, sposta_s
     dire(f"orologio: {motivo}")
     dire(f"correlazione Hm0-Hs massima ({best.r:.3f}) spostando i tempi del file di {best.sposta_h:+.2f} h; "
          f"con lo spostamento usato ({sposta:+g} h) {np.interp(sposta, C.sposta_h, C.r):.3f}")
+    if C.r_rada.notna().any():
+        kr = C.r_rada.idxmax()
+        dire(f"solo dove la boa e' rada: massimo ({C.r_rada[kr]:.3f}) a {C.sposta_h[kr]:+.2f} h, con {C.n_rada[kr]} burst")
     if abs(best.sposta_h - sposta) >= 1:
         dire("ATTENZIONE: le onde combaciano meglio con uno spostamento diverso di un'ora o piu': controllare l'orologio")
 
@@ -583,10 +653,22 @@ def confronta(cartella: Path, nome_burst, w_all, attrs, f_boa, f_medfs, sposta_s
         raise SystemExit(f"nessun burst ha un dato della boa entro {TOLLERANZA_MIN} minuti: controllare che i due "
                          "file coprano lo stesso periodo e lo spostamento dell'orologio")
     P.to_csv(uscita / "coppie.csv")
-    S = tabella_statistiche(P)
+    gruppi = [("tutte", P), ("boa oraria", P[~P.boa_rada])]
+    if P.boa_rada.any():
+        gruppi.append((f"boa, {etichetta_rada(b)}", P[P.boa_rada]))
+    S = pd.concat([tabella_statistiche(q).assign(coppie=nome) for nome, q in gruppi if len(q)], ignore_index=True)
+    S = S[["coppie"] + [c for c in S.columns if c != "coppie"]]
     S.to_csv(uscita / "statistiche.csv", index=False)
-    dire(f"\n{len(P)} coppie burst-boa entro {TOLLERANZA_MIN} minuti")
-    dire(S.to_string(index=False, float_format=lambda x: f"{x:.3f}", na_rep=""))
+    nr = int(P.boa_rada.sum())
+    dire(f"\n{len(P)} coppie burst-boa: {len(P) - nr} con la boa oraria (entro {TOLLERANZA_MIN} minuti)"
+         + (f", {nr} con la boa rada (entro {P.scarto_tempo_min[P.boa_rada].max():.0f} minuti)" if nr else ""))
+    fmt = dict(index=False, float_format=lambda x: f"{x:.3f}", na_rep="")
+    dire(S[S.coppie == "tutte"].drop(columns="coppie").to_string(**fmt))
+    if nr:
+        dire("\nper campionamento della boa:")
+        sel = S.classe.isin(["tutte", "Hs boa >= 0.5 m", "direzione affidabile, Hm0 >= 0.5 m"]) & \
+            S.grandezza.isin(["Hm0 contro Hs", "Tm01 contro Ta", "Dp meno Dd (gradi)"]) & (S.coppie != "tutte")
+        dire(S[sel].dropna(axis=1, how="all").to_string(**fmt))
     M = mareggiate(w, b, sposta)
     if not M.empty:
         M.to_csv(uscita / "mareggiate.csv", index=False)
@@ -599,8 +681,8 @@ def confronta(cartella: Path, nome_burst, w_all, attrs, f_boa, f_medfs, sposta_s
         dire(mov.drop(columns="fonte").to_string(index=False, float_format=lambda x: f"{x:+.1f}"))
 
     figura_altezza(P, b, w, sposta, M, mov, uscita / "figure" / "altezza_adcp_boa.png")
-    figura_onde(P, uscita / "figure" / "onde_adcp_boa.png")
-    figura_orologio(C, T, sposta, uscita / "figure" / "orologio_adcp.png")
+    figura_onde(P, b, uscita / "figure" / "onde_adcp_boa.png")
+    figura_orologio(C, T, sposta, b, uscita / "figure" / "orologio_adcp.png")
     (uscita / "riepilogo.txt").write_text("\n".join(righe) + "\n", encoding="utf-8")
     print(f"\nrisultati in {uscita}")
 

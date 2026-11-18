@@ -58,15 +58,22 @@ minuto; altrimenti si ricavano dai burst segnati con `platform_motion`.
 5. **Orologio.** Se il file dei burst dice che i tempi sono già in UTC (`time_offset_applied_h`, oppure
    `time_zone` = `UTC`), spostamento 0; altrimenti il numero intero di ore che rende massima la
    correlazione del passo 7; oppure il valore di `--sposta-adcp-ore`.
-6. **Boa.** Tempi letti come UTC, ordinati, senza duplicati.
+6. **Boa.** Tempi letti come UTC, ordinati, senza duplicati. Per ogni dato, la distanza dal dato vicino
+   più prossimo, mediana su 5 dati: se supera 2.5 ore la boa è «rada» (a Sturla dal 29 settembre dà un
+   dato ogni 3 ore, alle 0, 3, 6… UTC).
 7. **Correlazione con lo sfasamento.** Da −6 a +6 ore ogni 15 minuti: Hs della boa interpolata
    linearmente ai tempi dei burst spostati, solo dove i due dati della boa intorno distano al più 1.5 ore;
-   correlazione con Hm0.
-8. **Coppie.** Ogni burst con il dato della boa più vicino, se entro 30 minuti.
+   correlazione con Hm0. A parte, la stessa curva dove la boa è rada (dati distanti fino al passo rado più
+   mezz'ora): è più larga e meno precisa, e non entra nella scelta dello spostamento.
+8. **Coppie.** Ogni dato della boa con il burst più vicino: entro 30 minuti se la boa è oraria, entro metà
+   dell'intervallo (al più 90 minuti) se è rada. Con i burst ogni 2 ore e la boa ogni 3 ore, metà delle
+   coppie rade sono a 4 minuti e metà a 56 minuti. Un burst con più dati della boa tiene il più vicino.
+   La colonna `boa_rada` di `coppie.csv` dice quali coppie vengono dalla boa rada.
 9. **Statistiche.** Differenza media (ADCP − boa), scarto quadratico medio, indice di dispersione
    (scarto / media della boa), correlazione, mediana del rapporto ADCP/boa: Hm0 contro Hs, in tutto e per
    classi di Hs; con Hs della boa ≥ 0.5 m, Tm01 e Tm02 contro Ta e Tp contro Tp (anche la quota entro 1 s);
-   Dp − Dd riportata fra −180° e 180°: media, deviazione standard, quota entro 20°.
+   Dp − Dd riportata fra −180° e 180°: media, deviazione standard, quota entro 20°. Calcolate su tutte le
+   coppie, solo sulle coppie con la boa oraria e solo su quelle con la boa rada (colonna `coppie`).
 10. **Mareggiate e movimenti del telaio.** Mareggiate: tratti con Hs della boa ≥ 1.5 m mentre misura
     l'ADCP (uniti se a meno di 12 ore): massimo della boa, massimo dell'ADCP entro 6 ore, media dell'ADCP
     entro 90 minuti dal massimo della boa. Movimenti del telaio: gli episodi di `motion_events` del
@@ -83,5 +90,7 @@ minuto; altrimenti si ricavano dai burst segnati con `platform_motion`.
 12. **Uscite.** `figure/altezza_adcp_boa.png` (Hs della boa e Hm0 dell'ADCP nel tempo, con mareggiate e
     movimenti del telaio, e sotto il rapporto ADCP/boa di ogni coppia con la mediana mobile su 3 giorni),
     `figure/onde_adcp_boa.png` (dispersioni di altezza, periodo medio e direzione),
-    `figure/orologio_adcp.png`, `parametri_onde_adcp.csv`, `correlazione_sfasamenti.csv`, `coppie.csv`,
-    `statistiche.csv`, `mareggiate.csv`, `movimenti_telaio.csv`, `fasi_marea.csv`, `riepilogo.txt`.
+    `figure/orologio_adcp.png` (correlazione con lo sfasamento, boa oraria e boa rada; fasi di marea),
+    `parametri_onde_adcp.csv`, `correlazione_sfasamenti.csv`, `coppie.csv`, `statistiche.csv`,
+    `mareggiate.csv`, `movimenti_telaio.csv`, `fasi_marea.csv`, `riepilogo.txt`. Nelle figure i dati e le
+    coppie della boa rada sono in verde, quelli della boa oraria in arancione (boa) o blu (coppie).
