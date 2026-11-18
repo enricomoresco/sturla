@@ -28,3 +28,49 @@ spostando i tempi di −2.5 ore e la marea del livello era in ritardo di 2.5–2
 Uscite: `confronto_boa_coppie.csv`, `confronto_boa_statistiche.csv`, `confronto_boa_mareggiate.csv`,
 `confronto_boa_fasi_marea.csv` (con `--dati`), `figure/14_onde_adcp_boa.png`,
 `figure/15_orologio_adcp.png`.
+
+## Versione autonoma, dai burst grezzi: `confronto_boa_burst.py`
+
+Non usa i risultati del post-processing né il resto di `adcp_pd0`: ricalcola le onde dai burst e le
+confronta con la boa. Si mette lo script nella cartella con il file dei burst del pre-processing
+(`<ID>_L2_wave_bursts.nc`, anche rinominato `waveburst.nc`) e il CSV della boa, e si lancia
+`python confronto_boa_burst.py` (oppure `python confronto_boa_burst.py <cartella>`). Risultati in
+`<cartella>/confronto_boa_burst/`. Su un file sintetico dà gli stessi Hm0, periodi e direzioni del
+post-processing (differenze sotto 1e-6).
+
+1. **File.** Il NetCDF con `eta` e `n_samples` (preferito se il nome contiene «wave burst»), il CSV con le
+   colonne `UTC` e `Hs (m)`, e se c'è un NetCDF con `zos` (livello di MedFS).
+2. **Spettro di ogni burst.** Solo burst con `burst_qc` 1 o 3, abbastanza lunghi, con profondità valida e
+   `eta` completa. Tolta la tendenza lineare, spettro di Welch: segmenti di 256 campioni (128 s a 2 Hz),
+   finestra di Hann, sovrapposizione del 50%, media tolta in ogni segmento.
+3. **Parametri.** Fra 0.04 Hz e il minimo fra 1.2 Hz e la frequenza di Nyquist: m0, m1, m2 con la regola
+   dei trapezi; Hm0 = 4√m0, Tm01 = m0/m1, Tm02 = √(m0/m2), Tp = 1/fp con fp dal massimo dello spettro
+   raffinato con una parabola sui tre punti intorno al massimo.
+4. **Direzione.** Alla cella più vicina al 70% della profondità del sensore: u e v con i buchi interpolati
+   se sono al più il 30%, tendenza tolta, cross-spettri elevazione–velocità. Dp = (270° − atan2(Re Cηv,
+   Re Cηu)) modulo 360 alla frequenza di picco fra 0.04 e 0.6 Hz: direzione di provenienza, gradi da Nord.
+   Coerenza² = (|Cηu|² + |Cηv|²)/(Sηη (Suu + Svv)), media pesata con Sηη entro ±0.025 Hz dal picco.
+   Flag delle onde: 4 fuori posizione, 9 senza Hm0, 3 telaio in movimento o superficie trovata in meno del
+   90% dei ping, altrimenti 1. Flag della direzione: 4 fuori posizione, 9 senza Dp, 3 telaio in movimento,
+   Hm0 < 0.25 m o coerenza < 0.3, altrimenti 1. Tempo del burst: inizio più metà della durata.
+5. **Orologio.** Se il file dei burst dice che i tempi sono già in UTC (`time_offset_applied_h`, oppure
+   `time_zone` = `UTC`), spostamento 0; altrimenti il numero intero di ore che rende massima la
+   correlazione del passo 7; oppure il valore di `--sposta-adcp-ore`.
+6. **Boa.** Tempi letti come UTC, ordinati, senza duplicati.
+7. **Correlazione con lo sfasamento.** Da −6 a +6 ore ogni 15 minuti: Hs della boa interpolata
+   linearmente ai tempi dei burst spostati, solo dove i due dati della boa intorno distano al più 1.5 ore;
+   correlazione con Hm0.
+8. **Coppie.** Ogni burst con il dato della boa più vicino, se entro 30 minuti.
+9. **Statistiche.** Differenza media (ADCP − boa), scarto quadratico medio, indice di dispersione
+   (scarto / media della boa), correlazione, mediana del rapporto ADCP/boa: Hm0 contro Hs, in tutto e per
+   classi di Hs; con Hs della boa ≥ 0.5 m, Tm01 e Tm02 contro Ta e Tp contro Tp (anche la quota entro 1 s);
+   Dp − Dd riportata fra −180° e 180°: media, deviazione standard, quota entro 20°.
+10. **Mareggiate.** Tratti con Hs della boa ≥ 1.5 m mentre misura l'ADCP (uniti se a meno di 12 ore):
+    massimo della boa, massimo dell'ADCP entro 6 ore, media dell'ADCP entro 90 minuti dal massimo della boa.
+11. **Marea (facoltativa).** Livello dell'ADCP = profondità media del sensore in ogni burst; MedFS nel punto
+    valido più vicino alla boa; nel periodo comune, fit ai minimi quadrati di costante, tendenza e coseno e
+    seno di M2, S2, N2, K1 e O1, uguale per le due serie; ritardo = differenza di fase / velocità angolare.
+    L'incertezza viene dagli errori standard del fit e suppone rumore bianco: è indicativa.
+12. **Uscite.** `figure/onde_adcp_boa.png`, `figure/orologio_adcp.png`, `parametri_onde_adcp.csv`,
+    `correlazione_sfasamenti.csv`, `coppie.csv`, `statistiche.csv`, `mareggiate.csv`, `fasi_marea.csv`,
+    `riepilogo.txt`.
